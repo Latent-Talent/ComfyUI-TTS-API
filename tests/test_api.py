@@ -8,7 +8,7 @@ from tts_api import server
 
 def fake_wav():
     buf = io.BytesIO()
-    sf.write(buf, np.zeros(4800, dtype=np.float32), 48000, format="WAV")
+    sf.write(buf, np.zeros(24000, dtype=np.float32), 48000, format="WAV")
     return buf.getvalue()
 
 
