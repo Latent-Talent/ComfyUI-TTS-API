@@ -211,6 +211,12 @@ class ManagedTTS:
         self._log_handle = (data_dir / "managed-server.log").open("ab", buffering=0)
         environment = os.environ.copy()
         environment.update(self.config)
+        # ComfyUI may use cudaMallocAsync in its own process. VoxCPM2's
+        # compiled CUDA graph path calls checkPoolLiveAllocations, which that
+        # allocator cannot implement. Pin ONLY the child to native before
+        # importing torch; do not touch ComfyUI's allocator configuration.
+        environment["PYTORCH_ALLOC_CONF"] = "backend:native"
+        environment["PYTORCH_CUDA_ALLOC_CONF"] = "backend:native"
         environment["TTS_CONTROL_TOKEN"] = self.control_token
         environment["TTS_PARENT_PID"] = str(os.getpid())
         environment["TTS_DATA_DIR"] = str(data_dir) if "TTS_DATA_DIR" not in self.config else self.config["TTS_DATA_DIR"]
