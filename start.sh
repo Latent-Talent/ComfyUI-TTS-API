@@ -19,4 +19,8 @@ if [[ "${1:-}" == "--lan" ]]; then
     exit 1
   fi
 fi
+# VoxCPM's compiled CUDA-graph path is incompatible with cudaMallocAsync.
+# Force the isolated API worker to use the PyTorch native allocator only.
+export PYTORCH_ALLOC_CONF=backend:native
+export PYTORCH_CUDA_ALLOC_CONF=backend:native
 exec .venv/bin/python -m uvicorn tts_api.server:app --host "$HOST" --port "$PORT"
