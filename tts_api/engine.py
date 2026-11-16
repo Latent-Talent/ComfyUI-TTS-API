@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+from collections import OrderedDict
 import inspect
 import io
 import random
@@ -44,6 +45,7 @@ class VoxEngine:
             "0", "false", "no", "off"
         )
         self.compile_fallback_used = False
+        self._style_cache: OrderedDict[tuple, bytes] = OrderedDict()
         self._paused = False
         self._last_activity = time.monotonic()
 
@@ -174,6 +176,70 @@ class VoxEngine:
             call_kwargs.pop("seed")
             with self._legacy_seed(seed):
                 return self._model.generate(**call_kwargs)
+
+    def generate_with_delivery(
+        self, text: str, instructions: str = "",
+        reference_path: Optional[str] = None,
+        reference_text: Optional[str] = None,
+        seed: Optional[int] = None, steps: int = 10, cfg: float = 2.0,
+    ) -> bytes:
+        """Apply delivery instructions without injecting them into spoken text.
+
+        VoxCPM2 only accepts delivery guidance as a parenthesized text prefix.
+        First synthesize a short *unheard* style reference with that prefix,
+        then clone its style while speaking the exact supplied text. Cache
+        short references by settings to avoid a second generation each time.
+
+        This is best-effort style conditioning, not a separate native control
+        channel. The extra first pass is incurred once per distinct style.
+        """
+        style = instructions.strip()
+        if not style:
+            return self.generate(
+                text, reference_path=reference_path,
+                reference_text=reference_text, seed=seed, steps=steps, cfg=cfg,
+            )
+        if not text or not text.strip():
+            raise ValueError("A non-empty text is required")
+        if len(style) > 1000:
+            raise ValueError("Delivery instructions must be 1000 characters or fewer")
+        with self._lock:
+            source_version = None
+            if reference_path:
+                info = os.stat(reference_path)
+                source_version = (info.st_mtime_ns, info.st_size)
+            key = (self.model_name, style, reference_path, source_version,
+                   reference_text, seed, steps, cfg)
+            scratch_audio = self._style_cache.get(key)
+            if scratch_audio is None:
+                scratch_audio = self.generate(
+                    "Hello there.", reference_path=reference_path,
+                    reference_text=reference_text, description=style,
+                    seed=seed, steps=steps, cfg=cfg,
+                )
+                self._style_cache[key] = scratch_audio
+                if len(self._style_cache) > 12:
+                    self._style_cache.popitem(last=False)
+            else:
+                self._style_cache.move_to_end(key)
+            scratch_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", prefix="voxcpm-style-", suffix=".wav",
+                    delete=False,
+                ) as tmp:
+                    scratch_path = tmp.name
+                    tmp.write(scratch_audio)
+                return self.generate(
+                    text, reference_path=scratch_path,
+                    seed=seed, steps=steps, cfg=cfg,
+                )
+            finally:
+                if scratch_path is not None:
+                    try:
+                        os.unlink(scratch_path)
+                    except FileNotFoundError:
+                        pass
 
     def design_voice(self, sample_text: str, description: str,
                      seed: int | None = None, steps: int = 10,
