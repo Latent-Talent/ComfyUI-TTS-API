@@ -1,0 +1,68 @@
+/* ComfyUI TTS API sidebar: uses host theme colors, no global selectors. */
+.tts-ui {
+  --tts-bg: var(--comfy-menu-bg, var(--bg-color, #17191d));
+  --tts-fg: var(--fg-color, #e9e9eb);
+  --tts-muted: var(--descrip-text, #a5a7ae);
+  --tts-border: var(--border-color, #3c3e44);
+  --tts-field: var(--comfy-input-bg, var(--input-bg, #26282d));
+  color: var(--tts-fg);
+  background: var(--tts-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  min-height: 100%;
+  padding: 12px 12px 26px;
+  font-size: 12px;
+  box-sizing: border-box;
+  overflow-x: hidden;
+}
+.tts-ui *, .tts-ui *::before, .tts-ui *::after { box-sizing: border-box; }
+.tts-ui [hidden] { display: none !important; }
+.tts-ui .tts-head { display: flex; align-items: center; gap: 9px; padding: 2px 0 4px; }
+.tts-ui .tts-head-icon { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--tts-border); border-radius: 9px; font-size: 19px; background: var(--tts-field); }
+.tts-ui .tts-head-text { flex: 1; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.tts-ui .tts-head-text small, .tts-ui .tts-muted, .tts-ui .tts-hint { color: var(--tts-muted); }
+.tts-ui .tts-status-dot { width: 9px; height: 9px; border-radius: 50%; background: #888; flex: 0 0 auto; }
+.tts-ui .tts-status-dot.is-online { background: #68bc8a; box-shadow: 0 0 0 3px #68bc8a23; }
+.tts-ui .tts-status-dot.is-offline { background: #ce7676; box-shadow: 0 0 0 3px #ce767623; }
+.tts-ui .tts-banner { padding: 10px 11px; border-radius: 7px; background: var(--tts-field); border: 1px solid var(--tts-border); line-height: 1.5; }
+.tts-ui .tts-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; background: var(--tts-field); border: 1px solid var(--tts-border); border-radius: 9px; }
+.tts-ui button { appearance: none; border: 1px solid var(--tts-border); background: var(--tts-field); color: var(--tts-fg); border-radius: 7px; padding: 8px 10px; font-size: 12px; cursor: pointer; transition: background-color 120ms ease; }
+.tts-ui button:hover:not(:disabled) { background: color-mix(in srgb, var(--tts-field), var(--tts-fg) 12%); }
+.tts-ui button:disabled { opacity: .5; cursor: progress; }
+.tts-ui button:focus-visible, .tts-ui input:focus-visible, .tts-ui textarea:focus-visible, .tts-ui select:focus-visible { outline: 2px solid var(--p-primary-color, #94a5db); outline-offset: 2px; }
+.tts-ui .tts-tabs button { border: none; background: transparent; border-radius: 6px; }
+.tts-ui .tts-tabs button.is-active { background: var(--tts-bg); box-shadow: 0 1px 3px #0003; font-weight: 600; }
+.tts-ui .tts-panel { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+.tts-ui .tts-section-title { color: var(--tts-muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; font-weight: 650; padding-top: 4px; }
+.tts-ui .tts-info { display: flex; flex-direction: column; border: 1px solid var(--tts-border); border-radius: 9px; overflow: hidden; }
+.tts-ui .tts-info > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--tts-border); padding: 10px; }
+.tts-ui .tts-info > div:last-child { border-bottom: none; }
+.tts-ui .tts-info span { color: var(--tts-muted); }
+.tts-ui .tts-info strong { text-align: right; overflow-wrap: anywhere; font-size: 11px; font-weight: 600; }
+.tts-ui .tts-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.tts-ui .tts-endpoint { display: flex; align-items: center; gap: 6px; }
+.tts-ui .tts-endpoint code { flex: 1; min-width: 0; overflow-wrap: anywhere; background: var(--tts-field); border: 1px solid var(--tts-border); padding: 9px 7px; border-radius: 7px; font-size: 10px; line-height: 1.4; user-select: all; }
+.tts-ui p { margin: 0; line-height: 1.5; }
+.tts-ui .tts-voices { display: flex; flex-direction: column; gap: 6px; }
+.tts-ui .tts-voice { border: 1px solid var(--tts-border); border-radius: 8px; padding: 9px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.tts-ui .tts-voice-details { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.tts-ui .tts-voice-details strong { overflow-wrap: anywhere; }
+.tts-ui .tts-voice code { color: var(--tts-muted); font-size: 10px; overflow-wrap: anywhere; }
+.tts-ui .tts-voice-actions { display: flex; gap: 6px; }
+.tts-ui .tts-voice-actions button { padding: 5px 8px; font-size: 11px; }
+.tts-ui .tts-accordion { border: 1px solid var(--tts-border); padding: 10px; border-radius: 8px; }
+.tts-ui .tts-accordion summary { cursor: pointer; font-weight: 600; font-size: 12px; }
+.tts-ui .tts-accordion[open] { display: flex; flex-direction: column; gap: 11px; }
+.tts-ui .tts-accordion label, .tts-ui .tts-panel > label, .tts-ui .tts-test-row label { display: flex; flex-direction: column; gap: 5px; color: var(--tts-muted); }
+.tts-ui input:not([type="checkbox"]), .tts-ui select, .tts-ui textarea { width: 100%; min-width: 0; padding: 9px; color: var(--tts-fg); background: var(--tts-field); border: 1px solid var(--tts-border); border-radius: 7px; font: inherit; font-size: 12px; }
+.tts-ui textarea { resize: vertical; line-height: 1.5; }
+.tts-ui input[type="file"] { font-size: 11px; }
+.tts-ui label.tts-check { flex-direction: row; align-items: flex-start; gap: 8px; line-height: 1.4; }
+.tts-ui .tts-check input { margin-top: 2px; }
+.tts-ui .tts-primary { background: var(--p-primary-color, #536ba9); border-color: transparent; color: var(--p-primary-contrast-color, #fff); font-weight: 600; width: 100%; }
+.tts-ui .tts-primary:hover:not(:disabled) { filter: brightness(1.07); background: var(--p-primary-color, #536ba9); }
+.tts-ui .tts-test-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.tts-ui audio { width: 100%; border-radius: 9px; }
+.tts-ui .tts-feedback { border: 1px solid var(--tts-border); border-radius: 8px; padding: 10px; line-height: 1.45; background: var(--tts-field); overflow-wrap: anywhere; }
+.tts-ui .tts-feedback.is-error { border-color: #be6c6c; color: #e4a0a0; }
