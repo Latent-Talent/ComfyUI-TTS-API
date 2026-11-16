@@ -142,6 +142,12 @@ TTS_API_KEY=
 
 The sidebar uses ComfyUI's own HTTP security boundary. Anyone allowed to access your ComfyUI instance may be able to control the TTS API via the sidebar routes. Do not expose an unauthenticated ComfyUI instance to untrusted networks.
 
+### VoxCPM seed compatibility
+
+Some installed versions of `voxcpm` do not accept the `seed` argument in `VoxCPM._generate()`, even though newer upstream versions do. The TTS adapter detects this automatically. For newer versions, it forwards `seed`; for older versions, it seeds the isolated worker's PyTorch, NumPy, and Python random-number generators without passing an unsupported keyword. The previous `VoxCPM._generate() got an unexpected keyword argument 'seed'` failure in **Voices → Design** and **Test → Generate** should no longer occur. Seed reproducibility on older engines is best effort and may differ across hardware/software versions.
+
+Updating the project requires a `git pull --ff-only` and ComfyUI restart; it does not require changing the installed `voxcpm` package.
+
 ### Troubleshooting
 
 ```bash
