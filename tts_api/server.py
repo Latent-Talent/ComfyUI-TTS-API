@@ -98,13 +98,16 @@ def _render(request: SpeechRequest) -> bytes:
     if request.voice != "default" and voice is None:
         raise KeyError("Unknown voice ID")
     ref = str(STORE.audio_path(voice)) if voice and voice.get("reference_file") else None
-    description = (voice or {}).get("description", "") or None
-    if request.instructions:
-        description = (description + ", " if description else "") + request.instructions
+    # VoxCPM2 takes voice/style instructions by prepending "(description)"
+    # to text, but some installations speak that control text aloud.
+    # Playback must *only* synthesize request.input. For saved voices, the
+    # stored audio reference already captures the designed timbre.
+    # The 'instructions' field is intentionally not injected until a backend
+    # offers a separate, non-spoken conditioning channel.
     reference_text = voice.get("reference_text") if voice and ref else None
     return ENGINE.generate(
         request.input, reference_path=ref, reference_text=reference_text or None,
-        description=description, seed=request.seed, steps=request.steps, cfg=request.cfg
+        seed=request.seed, steps=request.steps, cfg=request.cfg
     )
 
 
@@ -245,7 +248,7 @@ async def clone_voice(name: str = Form(...), reference_text: str = Form(""),
 async def design_voice(request: DesignRequest):
     try:
         audio = await anyio.to_thread.run_sync(
-            ENGINE.generate, request.sample_text, None, None,
+            ENGINE.design_voice, request.sample_text,
             request.description, request.seed
         )
     except Exception as exc:
