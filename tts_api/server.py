@@ -29,11 +29,15 @@ MAX_TEXT = int(os.getenv("TTS_MAX_TEXT", "12000"))
 MAX_UPLOAD = int(os.getenv("TTS_MAX_UPLOAD_MB", "20")) * 1024 * 1024
 CONTROL_TOKEN = os.getenv("TTS_CONTROL_TOKEN", "")
 IDLE_SECONDS = max(0, int(os.getenv("TTS_IDLE_UNLOAD_SECONDS", "60")))
+PARENT_PID = int(os.getenv("TTS_PARENT_PID", "0"))
 
 
 async def _reap_idle_model():
     while True:
         await asyncio.sleep(5)
+        # A managed child must not persist after its ComfyUI parent crashes.
+        if PARENT_PID and os.getppid() != PARENT_PID:
+            os._exit(0)
         if IDLE_SECONDS:
             await anyio.to_thread.run_sync(ENGINE.unload_if_idle, IDLE_SECONDS)
 
