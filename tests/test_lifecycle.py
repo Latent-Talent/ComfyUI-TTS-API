@@ -10,17 +10,15 @@ from tts_api.engine import VoxEngine
 from tts_api import server
 
 
-def test_auto_start_is_default_and_tts_only_prompts_are_not_preempted(tmp_path):
+def test_auto_start_is_default_and_all_workflows_preempt_tts(tmp_path):
     manager = ManagedTTS(root=tmp_path)
     triggered = []
     manager.reserve_for_comfy = lambda: triggered.append(True)
-    manager.on_prompt({"prompt": {"1": {"class_type": "ComfyTTSGenerate"}}})
-    assert manager._pure_tts_job
-    assert not triggered
     manager.on_prompt({"prompt": {"1": {"class_type": "KSampler"}}})
-    assert not manager._pure_tts_job
     assert triggered == [True]
     assert not manager._disabled
+    manager.on_prompt({"prompt": {}})
+    assert triggered == [True]
 
 
 def test_unresponsive_owned_worker_is_terminated(tmp_path):
