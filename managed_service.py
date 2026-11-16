@@ -25,7 +25,6 @@ from pathlib import Path
 
 LOG = logging.getLogger("comfyui-tts-api")
 ROOT = Path(__file__).resolve().parent
-TTS_CLASSES = {"ComfyTTSGenerate", "ComfyTTSCloneVoice", "ComfyTTSDesignVoice"}
 ALLOWED_CONFIG = {
     "TTS_HOST", "TTS_PORT", "TTS_MODEL", "TTS_API_KEY",
     "TTS_DATA_DIR", "TTS_MAX_TEXT", "TTS_MAX_UPLOAD_MB",
@@ -74,7 +73,6 @@ class ManagedTTS:
         self._hold_until = 0.0
         self._installed = False
         self._owns_child = False
-        self._pure_tts_job = False
         self._disabled = self.config.get("TTS_AUTO_START", "true").lower() in ("0", "false", "no")
         self._skip_warning = False
 
@@ -228,9 +226,7 @@ class ManagedTTS:
                 if self._disabled:
                     continue
                 busy = self._queue_busy()
-                if not busy:
-                    self._pure_tts_job = False
-                if busy and not self._reserved and not self._pure_tts_job:
+                if busy and not self._reserved:
                     self._reserved = True
                     self._hold_until = time.monotonic() + 1
                     self._yield_gpu()
@@ -259,15 +255,8 @@ class ManagedTTS:
         prompt = payload.get("prompt", {}) if isinstance(payload, dict) else {}
         if not isinstance(prompt, dict) or not prompt:
             return payload
-        # Pure TTS workflow is permitted to use its own engine. Mixed workflows
-        # yield first; TTS node executions temporarily resume the service.
-        class_types = {v.get("class_type") for v in prompt.values() if isinstance(v, dict)}
-        if class_types and class_types.issubset(TTS_CLASSES):
-            with self._lock:
-                if not self._reserved:
-                    self._pure_tts_job = True
-            return payload
-        self._pure_tts_job = False
+        # This extension exposes a sidebar and a speech API, no workflow nodes.
+        # Any submitted ComfyUI workflow gets the GPU ahead of background TTS.
         self.reserve_for_comfy()
         return payload
 
@@ -311,21 +300,12 @@ def initialize():
         from server import PromptServer
         if PromptServer.instance is not None:
             PromptServer.instance.add_on_prompt_handler(_MANAGER.on_prompt)
+            from .sidebar_routes import register_routes
+            register_routes()
         else:
-            LOG.warning("[TTS API] No PromptServer instance; queue preemption is unavailable")
-    except (ImportError, AttributeError) as exc:
-        LOG.warning("[TTS API] Unable to register ComfyUI queue hook: %s", exc)
-
-
-def tts_node_call(fn, url):
-    """Allow a ComfyUI TTS node to use the paused worker during mixed workflows."""
-    if _MANAGER._disabled or not _MANAGER.is_local_url(url):
-        return fn()
-    yielded = _MANAGER.allow_tts_node()
-    try:
-        return fn()
-    finally:
-        _MANAGER.after_tts_node(yielded)
+            LOG.warning("[TTS API] No PromptServer instance; sidebar routes and preemption unavailable")
+    except (ImportError, AttributeError, RuntimeError) as exc:
+        LOG.warning("[TTS API] Could not register ComfyUI integration: %s", exc)
 
 
 atexit.register(_MANAGER.stop)
