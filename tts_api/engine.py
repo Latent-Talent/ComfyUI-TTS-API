@@ -337,7 +337,7 @@ class VoxEngine:
                     self.compile_fallback_used = True
                     self._unload_locked()
                     self._load()
-                    signal = self._model.generate(**kwargs)
+                    signal = self._generate_compatible(kwargs, seed)
                 sample_rate = int(self._model.tts_model.sample_rate)
                 audio = np.asarray(signal).squeeze()
                 if audio.ndim != 1 or audio.size == 0:
