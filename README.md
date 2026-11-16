@@ -37,13 +37,23 @@ The installer creates `ComfyUI-TTS-API/.venv` and installs the service. This is 
 
 **Restart ComfyUI normally.** Open the **TTS API** icon in ComfyUI's sidebar. You will see three tabs:
 
-- **Server:** online/offline, model VRAM state, idle unload interval, queue state, generation performance, API URL, unload model and restart API.
+- **Server:** online/offline, model VRAM state, allocator backend, idle unload interval, queue state, API key setup, generation performance, API URL, unload model and restart API.
 - **Voices:** list/copy/delete saved voice IDs, create a voice by description, or upload reference audio for cloning.
 - **Test:** type text, choose a saved voice, set delivery instructions/seed/steps, synthesize and play WAV audio.
 
 The API process starts automatically when ComfyUI loads the extension. The **GPU model** is only loaded on the first speech/design request.
 
 If the sidebar doesn't appear after restart, hard-refresh the ComfyUI browser tab (`Ctrl+Shift+R`). Confirm the extension is enabled and ComfyUI's startup log has no TTS API errors.
+
+### API key setup from the sidebar
+
+In **TTS API → Server → API key**, choose **Generate & save** to create a secure key, or enter your own (24–256 safe ASCII characters) and click **Save key**. Use **Show/Hide** and **Copy** to obtain the currently entered/generated key for SillyTavern.
+
+The key is persisted in the local `.env` file using restrictive filesystem permissions. Changing it restarts only the managed TTS API, not ComfyUI. Existing keys are never returned to the browser on load, and **a generated key is available only immediately after generation**. Copy it before closing the sidebar.
+
+The Server tab shows whether API authentication is enabled. If `TTS_API_KEY` was supplied as an environment variable to ComfyUI, the sidebar cannot change it: that environment variable takes precedence over `.env`.
+
+If you configure a key, use that same value as SillyTavern's API key for direct connections. ComfyUI's sidebar forwards requests internally and does not need a second key field.
 
 ### Local API
 
@@ -123,6 +133,7 @@ TTS_API_KEY=
 ```
 
 - **ComfyUI owns the process:** the service starts with ComfyUI and shuts down with it.
+- **Allocator compatibility:** ComfyUI may use `cudaMallocAsync`, but some Torch CUDA-graph code called by VoxCPM2 requires `checkPoolLiveAllocations` which `cudaMallocAsync` cannot support. Managed and standalone TTS subprocesses therefore explicitly use `PYTORCH_ALLOC_CONF=backend:native` (and its legacy alias). This does not change the CUDA allocator in the ComfyUI process.
 - **Memory is managed across processes:** the TTS service runs in its own Python/CUDA process. ComfyUI's native model manager does not own its allocations; the extension coordinates unload requests and, if necessary, stops its own service process to free VRAM.
 - **Model stays cached for short gaps:** 60 seconds idle by default. Choose a shorter interval for less VRAM pressure or `0` to disable idle unloading (workflow preemption still applies).
 - **Workflow priority:** TTS may be interrupted while ComfyUI generates images/videos. A simultaneous SillyTavern request may receive a 503 or be interrupted; perfect two-way scheduling is not available yet.
@@ -138,7 +149,7 @@ curl http://127.0.0.1:8025/health
 tail -n 100 ~/ComfyUI/custom_nodes/ComfyUI-TTS-API/data/managed-server.log
 ```
 
-The first speech request downloads model weights; failures involving Torch/CUDA must be diagnosed in the TTS-specific virtual environment. To disable automatic process startup, set `TTS_AUTO_START=false` and restart ComfyUI.
+The first speech request downloads model weights; failures involving Torch/CUDA must be diagnosed in the TTS-specific virtual environment. If you previously encountered `cudaMallocAsync does not yet support checkPoolLiveAllocations`, pull this update and restart ComfyUI so it launches a fresh TTS child with the native allocator. To disable automatic process startup, set `TTS_AUTO_START=false` and restart ComfyUI.
 
 ## Development and validation
 
