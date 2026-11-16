@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import io
+import logging
 import os
 from contextlib import asynccontextmanager
 import subprocess
@@ -19,6 +20,8 @@ from pydantic import BaseModel, Field
 
 from .engine import VoxEngine
 from .storage import VoiceStore
+
+LOG = logging.getLogger("comfyui-tts-api.server")
 
 ROOT = Path(os.environ.get("TTS_DATA_DIR", "./data")).expanduser().resolve()
 STORE = VoiceStore(ROOT / "voices")
@@ -110,6 +113,9 @@ async def health():
     return {"ok": True, "service": "comfyui-tts-api", "model": MODEL,
             "cuda_allocator": os.environ.get("PYTORCH_ALLOC_CONF", os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "backend:native")),
             "loaded": ENGINE.loaded, "paused": ENGINE.paused,
+            "compile_enabled": ENGINE.optimize,
+            "compile_fallback_used": ENGINE.compile_fallback_used,
+            "last_error": ENGINE.last_error,
             "idle_unload_seconds": IDLE_SECONDS, "last_stats": ENGINE.last_stats,
             "voice_count": len(STORE.list())}
 
@@ -155,8 +161,22 @@ async def speech(request: SpeechRequest):
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    except (RuntimeError, OSError) as exc:
-        raise HTTPException(503, f"Speech generation failed: {exc}") from exc
+    except Exception as exc:
+        # Third-party TTS backends may raise AssertionError, TypeError,
+        # ValueError, CUDA exceptions, or custom compiler exceptions. Do not
+        # turn them into an opaque HTTP 500 that says only "Internal Server Error".
+        LOG.exception("[TTS API] Unhandled speech error")
+        if ENGINE.last_error is None:
+            ENGINE.last_error = {"stage": "speech_api", "type": type(exc).__name__,
+                                 "message": str(exc)[:1000]}
+        message = str(exc).strip()[:1000] or "No error message supplied"
+        raise HTTPException(503, detail={
+            "error": "Speech generation failed",
+            "exception": type(exc).__name__,
+            "message": message,
+            "stage": ENGINE.last_error.get("stage", "unknown"),
+            "compile_enabled": ENGINE.optimize,
+        }) from exc
     if request.response_format == "wav" and request.speed == 1.0:
         return Response(content=audio, media_type="audio/wav",
                         headers={"Cache-Control": "no-store"})
