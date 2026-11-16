@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 
 LOG = logging.getLogger("comfyui-tts-api")
@@ -74,6 +75,7 @@ class ManagedTTS:
         self._hold_until = 0.0
         self._installed = False
         self._owns_child = False
+        self._pure_tts_job = False
         self._disabled = self.config.get("TTS_AUTO_START", "true").lower() in ("0", "false", "no")
         self._skip_warning = False
 
@@ -99,6 +101,20 @@ class ManagedTTS:
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 return response.status == 200
         except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
+            return False
+
+    def _healthy(self):
+        try:
+            with urllib.request.urlopen(self.url + "/health", timeout=0.4) as response:
+                return json.loads(response.read()).get("service") == "comfyui-tts-api"
+        except (OSError, ValueError, urllib.error.URLError):
+            return False
+
+    def is_local_url(self, url):
+        try:
+            parsed = urlsplit(url)
+            return parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1") and (parsed.port or 80) == self.port
+        except ValueError:
             return False
 
     def _port_open(self):
@@ -218,7 +234,9 @@ class ManagedTTS:
                 if self._disabled:
                     continue
                 busy = self._queue_busy()
-                if busy and not self._reserved:
+                if not busy:
+                    self._pure_tts_job = False
+                if busy and not self._reserved and not self._pure_tts_job:
                     self._reserved = True
                     self._hold_until = time.monotonic() + 1
                     self._yield_gpu()
@@ -251,7 +269,11 @@ class ManagedTTS:
         # yield first; TTS node executions temporarily resume the service.
         class_types = {v.get("class_type") for v in prompt.values() if isinstance(v, dict)}
         if class_types and class_types.issubset(TTS_CLASSES):
+            with self._lock:
+                if not self._reserved:
+                    self._pure_tts_job = True
             return payload
+        self._pure_tts_job = False
         self.reserve_for_comfy()
         return payload
 
@@ -260,7 +282,16 @@ class ManagedTTS:
             if not self._running():
                 self._spawn()
             if not self._running():
+                if self._port_open():
+                    # An independently started API may be usable, but we must
+                    # never kill it or claim ownership of its VRAM.
+                    return False
                 raise RuntimeError("Managed TTS server unavailable; check data/managed-server.log")
+            deadline = time.monotonic() + 15.0
+            while not self._healthy() and time.monotonic() < deadline and self._running():
+                time.sleep(0.15)
+            if not self._healthy():
+                raise RuntimeError("Managed TTS server did not become ready; inspect data/managed-server.log")
             if self._reserved:
                 if not self._request("/api/internal/resume"):
                     raise RuntimeError("Cannot resume managed TTS server")
@@ -292,8 +323,10 @@ def initialize():
         LOG.warning("[TTS API] Unable to register ComfyUI queue hook: %s", exc)
 
 
-def tts_node_call(fn):
+def tts_node_call(fn, url):
     """Allow a ComfyUI TTS node to use the paused worker during mixed workflows."""
+    if _MANAGER._disabled or not _MANAGER.is_local_url(url):
+        return fn()
     yielded = _MANAGER.allow_tts_node()
     try:
         return fn()
