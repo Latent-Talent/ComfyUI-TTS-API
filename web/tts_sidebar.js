@@ -39,6 +39,7 @@ function template() {
           <div><span>Backend</span><strong data-model>VoxCPM2</strong></div>
           <div><span>API</span><strong data-service>Checking</strong></div>
           <div><span>Model memory</span><strong data-memory>Not loaded</strong></div>
+          <div><span>CUDA allocator</span><strong data-allocator>Native</strong></div>
           <div><span>Idle unload</span><strong data-idle>60s</strong></div>
           <div><span>ComfyUI queue</span><strong data-queue>Checking</strong></div>
         </div>
@@ -147,6 +148,7 @@ function mount(container) {
         $("[data-service]").textContent = ok ? (result.running ? "Managed · online" : "External · online") : "Offline";
         $("[data-model]").textContent = h?.model || "VoxCPM2";
         $("[data-memory]").textContent = !ok ? "Unavailable" : h.paused ? "Released / paused" : h.loaded ? "Loaded in VRAM" : "Unloaded";
+        $("[data-allocator]").textContent = h?.cuda_allocator || "Unknown";
         $("[data-idle]").textContent = result.config.idle_unload_seconds === 0
             ? "Disabled" : result.config.idle_unload_seconds + "s";
         $("[data-queue]").textContent = result.busy ? "Busy" : "Idle";
