@@ -6,6 +6,7 @@ This exposes the same operations to users who can access ComfyUI itself.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from urllib.parse import urlsplit
 
@@ -49,13 +50,29 @@ async def _forward(method: str, path: str, *, payload=None, multipart=None,
             ) as upstream:
                 raw = await upstream.read()
                 if upstream.status >= 400:
+                    details = raw.decode("utf-8", errors="replace")[:1500]
                     try:
-                        details = await asyncio.to_thread(
-                            lambda: raw.decode("utf-8", errors="replace")[:1200]
-                        )
-                    except Exception:
-                        details = "Speech service returned an error"
-                    return _error(upstream.status, details)
+                        body = json.loads(details)
+                        if isinstance(body, dict):
+                            detail = body.get("detail", body.get("error", details))
+                            if isinstance(detail, dict):
+                                label = detail.get("error", "TTS error")
+                                kind = detail.get("exception", "")
+                                stage = detail.get("stage", "")
+                                message = detail.get("message", "")
+                                parts = [str(label)]
+                                if kind:
+                                    parts.append(f"[{kind}]")
+                                if stage:
+                                    parts.append(f"({stage})")
+                                if message:
+                                    parts.append("— " + str(message))
+                                details = " ".join(parts)
+                            elif isinstance(detail, str):
+                                details = detail
+                    except (ValueError, TypeError):
+                        pass
+                    return _error(upstream.status, details[:1200])
                 if audio:
                     return web.Response(
                         body=raw,
