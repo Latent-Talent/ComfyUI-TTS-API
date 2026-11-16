@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, web
 
@@ -80,6 +81,10 @@ async def status(_request: web.Request) -> web.Response:
         "reserved": _MANAGER._reserved,
         "api_url": _MANAGER.url,
         "port": _MANAGER.port,
+        "api_key": {
+            "configured": _MANAGER.api_key_configured,
+            "editable": _MANAGER.api_key_editable,
+        },
         "config": {
             "idle_unload_seconds": int(_MANAGER.config.get("TTS_IDLE_UNLOAD_SECONDS", 60)),
         },
@@ -163,6 +168,36 @@ async def unload(_request: web.Request) -> web.Response:
     return await _forward("POST", "/api/model/unload")
 
 
+async def configure_api_key(request: web.Request) -> web.Response:
+    """Rotate or set service credentials through the ComfyUI same-origin UI.
+
+    A saved key is never returned by status. Generate returns the key exactly
+    once; callers must copy it for SillyTavern before closing the panel.
+    """
+    origin = request.headers.get("Origin")
+    if origin and urlsplit(origin).netloc != request.host:
+        return _error(403, "API key updates must originate from the ComfyUI page")
+    if request.content_length is not None and request.content_length > 1024:
+        return _error(413, "API key request exceeds size limit")
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Expected JSON object")
+        action = payload.get("action", "")
+        key = payload.get("key")
+        result = await asyncio.to_thread(_MANAGER.configure_api_key, action, key)
+    except (ValueError, TypeError) as exc:
+        return _error(422, str(exc))
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    except RuntimeError as exc:
+        return _error(409, str(exc))
+    except OSError:
+        LOG.exception("[TTS API] Unable to save API key")
+        return _error(500, "Unable to persist API key")
+    return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+
 async def restart(_request: web.Request) -> web.Response:
     # Only terminate the child we own; do not touch an independent service.
     with _MANAGER._lock:
@@ -189,3 +224,4 @@ def register_routes():
     routes.post(BASE + "/speech")(generate)
     routes.post(BASE + "/model/unload")(unload)
     routes.post(BASE + "/server/restart")(restart)
+    routes.post(BASE + "/settings/api-key")(configure_api_key)
