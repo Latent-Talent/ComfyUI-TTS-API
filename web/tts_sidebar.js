@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import "./tts_sidebar.css";
+
 
 const ROUTE = "/tts-api";
 let activePanel = null;
@@ -308,6 +308,15 @@ function mount(container) {
 app.registerExtension({
     name: "LatentTalent.TTS.API.Sidebar",
     async setup() {
+        // ComfyUI serves extensions as native ES modules; CSS imports are not
+        // supported by the browser without a bundler. Load the stylesheet.
+        if (!document.getElementById("tts-api-sidebar-styles")) {
+            const style = document.createElement("link");
+            style.id = "tts-api-sidebar-styles";
+            style.rel = "stylesheet";
+            style.href = new URL("./tts_sidebar.css", import.meta.url).href;
+            document.head.appendChild(style);
+        }
         app.extensionManager.registerSidebarTab({
             id: "latent-talent-tts-api",
             title: "TTS API",
