@@ -9,7 +9,6 @@ import io
 import os
 
 import torch
-import torchaudio
 
 
 def _post(url, payload, key, timeout=600):
