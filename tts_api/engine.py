@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import io
+import random
+from contextlib import contextmanager
 import logging
 import os
 import sys
@@ -103,6 +106,71 @@ class VoxEngine:
         with self._lock:
             self._unload_locked()
 
+    @staticmethod
+    def _accepts_seed(model) -> bool | None:
+        """Inspect the internal VoxCPM method, not generate(*args, **kwargs).
+
+        Some released voxcpm versions lack seed on _generate even though the
+        latest upstream has it. None means the signature could not be read.
+        """
+        generate_impl = getattr(model, "_generate", None)
+        if generate_impl is None:
+            return None
+        try:
+            parameters = inspect.signature(generate_impl).parameters
+        except (TypeError, ValueError):
+            return None
+        return ("seed" in parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+        ))
+
+    @staticmethod
+    @contextmanager
+    def _legacy_seed(seed: int | None):
+        """Best-effort seeded generation for VoxCPM releases without seed kwarg.
+
+        Preserve Torch, NumPy and Python RNG states in the isolated worker.
+        This doesn't promise bit-identical audio across different backends.
+        """
+        if seed is None:
+            yield
+            return
+        import torch
+        devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        numpy_state = np.random.get_state()
+        python_state = random.getstate()
+        try:
+            with torch.random.fork_rng(devices=devices):
+                torch.manual_seed(int(seed))
+                np.random.seed(int(seed) % (2 ** 32))
+                random.seed(int(seed))
+                yield
+        finally:
+            np.random.set_state(numpy_state)
+            random.setstate(python_state)
+
+    def _generate_compatible(self, kwargs: dict, seed: int | None):
+        """Run current and older VoxCPM versions without dropping the seed."""
+        call_kwargs = dict(kwargs)
+        if seed is not None and self._accepts_seed(self._model) is False:
+            call_kwargs.pop("seed", None)
+            with self._legacy_seed(seed):
+                return self._model.generate(**call_kwargs)
+        try:
+            return self._model.generate(**call_kwargs)
+        except TypeError as exc:
+            # Only retry when the error is specifically from a rejected seed
+            # argument, not from arbitrary TypeErrors inside the TTS model.
+            message = str(exc)
+            if (seed is None or "seed" not in call_kwargs
+                    or "unexpected keyword argument 'seed'" not in message):
+                raise
+            LOG.info("[TTS API] Installed VoxCPM does not accept seed; using "
+                     "isolated RNG seeding instead")
+            call_kwargs.pop("seed")
+            with self._legacy_seed(seed):
+                return self._model.generate(**call_kwargs)
+
     def generate(self, text: str, reference_path: Optional[str] = None,
                  reference_text: Optional[str] = None, description: Optional[str] = None,
                  seed: Optional[int] = None, steps: int = 10, cfg: float = 2.0) -> bytes:
@@ -133,7 +201,7 @@ class VoxEngine:
             start = time.perf_counter()
             try:
                 try:
-                    signal = self._model.generate(**kwargs)
+                    signal = self._generate_compatible(kwargs, seed)
                 except Exception as exc:
                     # VoxCPM2 defaults to torch.compile(..., mode="reduce-overhead").
                     # Recover once from a known compile/graph incompatibility without
