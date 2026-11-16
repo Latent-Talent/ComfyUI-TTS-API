@@ -108,6 +108,7 @@ def _render(request: SpeechRequest) -> bytes:
 @app.get("/health")
 async def health():
     return {"ok": True, "service": "comfyui-tts-api", "model": MODEL,
+            "cuda_allocator": os.environ.get("PYTORCH_ALLOC_CONF", os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "backend:native")),
             "loaded": ENGINE.loaded, "paused": ENGINE.paused,
             "idle_unload_seconds": IDLE_SECONDS, "last_stats": ENGINE.last_stats,
             "voice_count": len(STORE.list())}
