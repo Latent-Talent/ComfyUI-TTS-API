@@ -1,15 +1,13 @@
-"""ComfyUI custom-node entrypoint.
+"""ComfyUI TTS API integration: sidebar and managed local speech service.
 
-ComfyUI imports this as a package; ordinary test runners sometimes import the
-repository's __init__.py as a top-level module instead.
+This extension intentionally registers NO ComfyUI workflow nodes.
 """
+WEB_DIRECTORY = "./web"
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
+
 if __package__:
-    from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-    from .managed_service import initialize as _initialize_tts_service
+    from .managed_service import initialize as _initialize_tts_api
+    _initialize_tts_api()
 
-    _initialize_tts_service()
-else:
-    NODE_CLASS_MAPPINGS = {}
-    NODE_DISPLAY_NAME_MAPPINGS = {}
-
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["WEB_DIRECTORY", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
