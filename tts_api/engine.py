@@ -113,7 +113,10 @@ class VoxEngine:
         Some released voxcpm versions lack seed on _generate even though the
         latest upstream has it. None means the signature could not be read.
         """
-        generate_impl = getattr(model, "_generate", None)
+        try:
+            generate_impl = getattr(model, "_generate", None)
+        except AttributeError:
+            return None
         if generate_impl is None:
             return None
         try:
