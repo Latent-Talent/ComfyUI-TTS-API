@@ -9,6 +9,7 @@ from contextlib import contextmanager
 import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 from typing import Optional
@@ -173,6 +174,56 @@ class VoxEngine:
             call_kwargs.pop("seed")
             with self._legacy_seed(seed):
                 return self._model.generate(**call_kwargs)
+
+    def design_voice(self, sample_text: str, description: str,
+                     seed: int | None = None, steps: int = 10,
+                     cfg: float = 2.0) -> bytes:
+        """Create a described voice, then synthesize ONLY sample_text.
+
+        VoxCPM2 accepts voice instructions exclusively as an inline
+        '(description)' prefix. Some checkpoints speak those instructions.
+        The first, short generated utterance therefore serves *only* as a
+        timbre reference and is never returned as the designed voice sample.
+        The second pass uses reference-only cloning with just sample_text.
+
+        Two passes happen only when creating a reusable voice; ordinary
+        playback stays single-pass and never injects the description.
+        """
+        if not sample_text or not sample_text.strip():
+            raise ValueError("A non-empty sample text is required")
+        if not description or not description.strip():
+            raise ValueError("A non-empty voice description is required")
+        clean_description = description.strip().replace("(", "").replace(")", "")
+        if not clean_description:
+            raise ValueError("Voice description cannot consist only of parentheses")
+        with self._lock:
+            # Never play or persist the scratch conditioning utterance.
+            scratch_audio = self.generate(
+                "Hello there.", description=clean_description,
+                seed=seed, steps=steps, cfg=cfg,
+            )
+            scratch_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", suffix=".wav", prefix="voxcpm-voice-design-",
+                    delete=False,
+                ) as tmp:
+                    scratch_path = tmp.name
+                    tmp.write(scratch_audio)
+                # Importantly, NO parenthesized instruction or reference
+                # transcript is sent for the actual sample. This prevents
+                # instruction text from being spoken, and preserves an exact
+                # transcript for subsequent high-fidelity voice cloning.
+                return self.generate(
+                    sample_text, reference_path=scratch_path,
+                    seed=seed, steps=steps, cfg=cfg,
+                )
+            finally:
+                if scratch_path is not None:
+                    try:
+                        os.unlink(scratch_path)
+                    except FileNotFoundError:
+                        pass
 
     def generate(self, text: str, reference_path: Optional[str] = None,
                  reference_text: Optional[str] = None, description: Optional[str] = None,
