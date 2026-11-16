@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-tts-api"
-version = "0.1.0"
-description = "Standalone VoxCPM2 TTS gateway with ComfyUI nodes and OpenAI-style speech API"
+version = "0.3.0"
+description = "ComfyUI-managed VoxCPM2 speech API with native sidebar and SillyTavern compatibility"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1",
