@@ -78,6 +78,14 @@ Set the TTS provider to **OpenAI Compatible**, model `voxcpm2`, voice `default` 
 
 Some SillyTavern versions instead ask for an API root; use `http://127.0.0.1:8025/v1` in that case. Enter saved voice IDs manually if your version does not discover them. When SillyTavern runs on a different device, use the ComfyUI host's LAN/VPN address and enable authenticated LAN serving as described below.
 
+## Voice description vs. delivery instructions
+
+**Voice Design → Description** defines a reusable voice identity. The only text intentionally synthesized into the saved voice sample is the **Sample text** field. VoxCPM2 only supports inline parenthesized voice instructions, which some model versions pronounce. The implementation therefore creates a short disposable conditioning clip with the description, then clones that timbre into a clean sample containing only the specified words. Creating a new voice requires two synthesis passes.
+
+**Test → Delivery instructions** and the OpenAI-compatible `instructions` parameter control how a particular reply is delivered, without adding instruction words to the final synthesis text. With this VoxCPM2 backend, a short style-conditioning clip is synthesized once for each distinct combination of instruction, voice, seed, steps, and CFG; later requests with identical settings reuse that clip from the worker's bounded in-memory cache. Ordinary speech with no delivery instructions stays single-pass.
+
+Delivery conditioning and cloning fidelity are **best effort**: VoxCPM2 does not provide an independent nonverbal style-parameter API. The voice may not always follow an instruction precisely; the final speech call receives only the intended sample/reply text, but acoustic fidelity still depends on the model. The first use of a style is slower than subsequent cached uses, and cached references are lost when the TTS worker restarts.
+
 ## Voice management API
 
 Clone a voice from a reference file (only with authorization):
