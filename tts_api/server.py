@@ -1,8 +1,11 @@
 """OpenAI-compatible local TTS API and persistent voice registry."""
 from __future__ import annotations
 
+import asyncio
+import hmac
 import io
 import os
+from contextlib import asynccontextmanager
 import subprocess
 import shutil
 from pathlib import Path
@@ -24,7 +27,32 @@ ENGINE = VoxEngine(MODEL, os.getenv("TTS_UNLOAD_AFTER_REQUEST", "false").lower()
 KEY = os.getenv("TTS_API_KEY", "")
 MAX_TEXT = int(os.getenv("TTS_MAX_TEXT", "12000"))
 MAX_UPLOAD = int(os.getenv("TTS_MAX_UPLOAD_MB", "20")) * 1024 * 1024
-app = FastAPI(title="ComfyUI TTS API", version="0.1.0")
+CONTROL_TOKEN = os.getenv("TTS_CONTROL_TOKEN", "")
+IDLE_SECONDS = max(0, int(os.getenv("TTS_IDLE_UNLOAD_SECONDS", "60")))
+
+
+async def _reap_idle_model():
+    while True:
+        await asyncio.sleep(5)
+        if IDLE_SECONDS:
+            await anyio.to_thread.run_sync(ENGINE.unload_if_idle, IDLE_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_reap_idle_model())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await anyio.to_thread.run_sync(ENGINE.unload)
+
+
+app = FastAPI(title="ComfyUI TTS API", version="0.2.0", lifespan=lifespan)
 
 
 async def authenticate(authorization: str | None = Header(default=None),
@@ -75,8 +103,30 @@ def _render(request: SpeechRequest) -> bytes:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "model": MODEL, "loaded": ENGINE.loaded,
-            "last_stats": ENGINE.last_stats, "voice_count": len(STORE.list())}
+    return {"ok": True, "service": "comfyui-tts-api", "model": MODEL,
+            "loaded": ENGINE.loaded, "paused": ENGINE.paused,
+            "idle_unload_seconds": IDLE_SECONDS, "last_stats": ENGINE.last_stats,
+            "voice_count": len(STORE.list())}
+
+
+def _authorize_control(value: str | None):
+    if not CONTROL_TOKEN or not hmac.compare_digest(value or "", CONTROL_TOKEN):
+        raise HTTPException(403, "Control operations require an internal token")
+
+
+@app.post("/api/internal/pause", include_in_schema=False)
+async def internal_pause(x_tts_control_token: str | None = Header(default=None)):
+    _authorize_control(x_tts_control_token)
+    if not await anyio.to_thread.run_sync(ENGINE.try_pause):
+        raise HTTPException(409, "TTS is currently generating audio")
+    return {"paused": True, "loaded": ENGINE.loaded}
+
+
+@app.post("/api/internal/resume", include_in_schema=False)
+async def internal_resume(x_tts_control_token: str | None = Header(default=None)):
+    _authorize_control(x_tts_control_token)
+    await anyio.to_thread.run_sync(ENGINE.resume)
+    return {"paused": False, "loaded": ENGINE.loaded}
 
 
 @app.get("/v1/models", dependencies=[Depends(authenticate)])
