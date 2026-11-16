@@ -13,6 +13,8 @@ import atexit
 import json
 import logging
 import os
+import re
+import tempfile
 import secrets
 import signal
 import subprocess
@@ -75,6 +77,69 @@ class ManagedTTS:
         self._owns_child = False
         self._disabled = self.config.get("TTS_AUTO_START", "true").lower() in ("0", "false", "no")
         self._skip_warning = False
+
+    @property
+    def api_key_configured(self):
+        # Never return the key itself to a passive status request.
+        return bool(self.config.get("TTS_API_KEY"))
+
+    @property
+    def api_key_editable(self):
+        # Environment variables override .env for the managed process.
+        return "TTS_API_KEY" not in os.environ
+
+    def configure_api_key(self, action: str, requested_key: str | None = None):
+        """Configure the key in .env and restart only our own managed worker.
+
+        Only an explicit sidebar interaction may receive a generated key.
+        The existing key is deliberately not recoverable through the UI.
+        """
+        if action not in ("generate", "set"):
+            raise ValueError("Unknown key operation")
+        with self._lock:
+            if not self.api_key_editable:
+                raise PermissionError("TTS_API_KEY is controlled by an environment variable")
+            if self._queue_busy():
+                raise RuntimeError("Cannot change the API key while a ComfyUI workflow is active")
+            if not self._running() and self._port_open():
+                raise RuntimeError("Cannot modify the key of an independently started service")
+
+            key = secrets.token_urlsafe(32) if action == "generate" else requested_key
+            if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9._~+\/=\-]{24,256}", key):
+                raise ValueError("API key must be 24–256 safe ASCII characters")
+            # Replace every existing assignment so an old duplicate cannot win.
+            destination = self.root / ".env"
+            old = destination.read_text(encoding="utf-8") if destination.exists() else ""
+            lines = [line for line in old.splitlines()
+                     if not re.match(r"^\s*(?:export\s+)?TTS_API_KEY\s*=", line)]
+            lines.append("TTS_API_KEY=" + key)
+            self.root.mkdir(parents=True, exist_ok=True)
+            temp_name = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=str(self.root),
+                    prefix=".tts-env-", delete=False
+                ) as temp:
+                    temp_name = temp.name
+                    os.chmod(temp_name, 0o600)
+                    temp.write("\n".join(lines) + "\n")
+                    temp.flush()
+                    os.fsync(temp.fileno())
+                os.replace(temp_name, destination)
+            finally:
+                if temp_name and os.path.exists(temp_name):
+                    os.unlink(temp_name)
+
+            self.config["TTS_API_KEY"] = key
+            # An old worker would continue to accept the old key: restart it.
+            was_running = self._running()
+            if was_running:
+                self._terminate()
+            started = self._spawn() if not self._disabled else False
+            return {
+                "configured": True, "restarting": started, "managed": not self._disabled,
+                "key": key if action == "generate" else None,
+            }
 
     def _python(self):
         if os.name == "nt":
