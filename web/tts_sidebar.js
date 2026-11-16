@@ -54,6 +54,18 @@ function template() {
           <button type="button" data-action="copy-url" title="Copy speech API URL">Copy</button>
         </div>
         <p class="tts-hint">Use this URL with SillyTavern’s OpenAI Compatible TTS provider. If SillyTavern is on another device, replace localhost with your ComfyUI server address and enable authenticated LAN access in .env.</p>
+        <div class="tts-section-title">API key</div>
+        <div class="tts-info"><div><span>Authentication</span><strong data-api-key-status>Checking</strong></div></div>
+        <label class="tts-key-label">New or generated API key
+          <input data-api-key type="password" value="" autocomplete="off" spellcheck="false" placeholder="Generate a key or enter your own (24+ chars)">
+        </label>
+        <div class="tts-actions tts-key-actions">
+          <button type="button" data-action="generate-key">Generate &amp; save</button>
+          <button type="button" data-action="save-key">Save key</button>
+          <button type="button" data-action="copy-key">Copy</button>
+          <button type="button" data-action="toggle-key">Show</button>
+        </div>
+        <p class="tts-hint">Existing keys are never displayed. A generated key is shown only now — copy it to SillyTavern. Saving a key immediately restarts the managed API; it does not restart ComfyUI.</p>
         <div class="tts-section-title">Last generation</div>
         <p class="tts-muted" data-bench>No speech generated yet.</p>
       </div>
@@ -139,6 +151,12 @@ function mount(container) {
             ? "Disabled" : result.config.idle_unload_seconds + "s";
         $("[data-queue]").textContent = result.busy ? "Busy" : "Idle";
         $("[data-endpoint]").textContent = result.api_url + "/v1/audio/speech";
+        const key = result.api_key || {};
+        $("[data-api-key-status]").textContent = key.configured ? "Enabled" : "Disabled (localhost)";
+        root.querySelectorAll("[data-action=generate-key], [data-action=save-key]").forEach((button) => {
+            button.disabled = key.editable === false;
+            button.title = key.editable === false ? "API key managed by environment variable" : "";
+        });
         const bench = h?.last_stats;
         $("[data-bench]").textContent = bench?.seconds != null
             ? `${bench.seconds}s generated ${bench.audio_seconds}s audio · RTF ${bench.real_time_factor ?? "?"}`
@@ -227,6 +245,44 @@ function mount(container) {
     $("[data-action=restart]").addEventListener("click", (e) => perform(
         e.currentTarget, () => request("/server/restart", { method: "POST" }),
         "Speech API is restarting."));
+
+    // API keys are stored server-side in .env; only a newly generated key is
+    // returned once. Never include credentials in passive status responses.
+    $("[data-action=generate-key]").addEventListener("click", (e) => perform(
+        e.currentTarget, async () => {
+            const result = await (await request("/settings/api-key", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({action: "generate"}),
+            })).json();
+            $("[data-api-key]").value = result.key;
+            feedback("Key generated and saved. Copy it now for SillyTavern; it will not be shown again after closing the panel.");
+        }));
+    $("[data-action=save-key]").addEventListener("click", (e) => perform(
+        e.currentTarget, async () => {
+            const key = $("[data-api-key]").value.trim();
+            if (key.length < 24) throw new Error("API key must contain at least 24 characters.");
+            await request("/settings/api-key", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({action: "set", key}),
+            });
+            feedback("API key saved. The managed service is restarting. Update SillyTavern with this key.");
+        }));
+    $("[data-action=copy-key]").addEventListener("click", async () => {
+        const key = $("[data-api-key]").value;
+        if (!key) return feedback("Generate or enter an API key before copying.", true);
+        try {
+            await navigator.clipboard.writeText(key);
+            feedback("API key copied.");
+        } catch (_) {
+            feedback("Copy failed. Select and copy the field manually.", true);
+        }
+    });
+    $("[data-action=toggle-key]").addEventListener("click", () => {
+        const input = $("[data-api-key]");
+        input.type = input.type === "password" ? "text" : "password";
+        $("[data-action=toggle-key]").textContent = input.type === "password" ? "Show" : "Hide";
+    });
+
     $("[data-action=design]").addEventListener("click", (e) => perform(
         e.currentTarget,
         async () => {
