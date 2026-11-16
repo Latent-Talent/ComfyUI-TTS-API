@@ -10,6 +10,8 @@ import os
 
 import torch
 
+from .managed_service import tts_node_call
+
 
 def _post(url, payload, key, timeout=600):
     import urllib.request
@@ -52,10 +54,12 @@ class LocalTTSGenerate:
 
     def generate(self, text, voice, model, seed, steps, cfg, server_url, api_key, delivery=""):
         import soundfile as sf
-        raw = _post(server_url.rstrip("/") + "/v1/audio/speech",
-                    {"model": model, "input": text, "voice": voice,
-                     "response_format": "wav", "instructions": delivery,
-                     "seed": seed, "steps": steps, "cfg": cfg}, api_key)
+        raw = tts_node_call(
+            lambda: _post(server_url.rstrip("/") + "/v1/audio/speech",
+                          {"model": model, "input": text, "voice": voice,
+                           "response_format": "wav", "instructions": delivery,
+                           "seed": seed, "steps": steps, "cfg": cfg}, api_key),
+            server_url)
         audio, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=True)
         waveform = torch.from_numpy(audio.T.copy()).unsqueeze(0)
         return ({"waveform": waveform, "sample_rate": sr}, f"{len(audio)/sr:.2f} sec at {sr} Hz")
@@ -127,9 +131,11 @@ class LocalTTSDesign:
 
     def design(self, name, description, sample_text, seed, server_url, api_key):
         import json
-        raw = _post(server_url.rstrip("/") + "/api/voices/design",
-                    {"name": name, "description": description,
-                     "sample_text": sample_text, "seed": seed}, api_key)
+        raw = tts_node_call(
+            lambda: _post(server_url.rstrip("/") + "/api/voices/design",
+                          {"name": name, "description": description,
+                           "sample_text": sample_text, "seed": seed}, api_key),
+            server_url)
         return (json.loads(raw)["id"],)
 
 
