@@ -1,7 +1,9 @@
 """Lazy-loaded VoxCPM2 engine. Requires voxcpm in this service's own venv."""
 from __future__ import annotations
 
+import gc
 import io
+import sys
 import threading
 import time
 from typing import Optional
@@ -17,6 +19,50 @@ class VoxEngine:
         self._model = None
         self._lock = threading.RLock()
         self.last_stats: dict = {}
+        self._paused = False
+        self._last_activity = time.monotonic()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def _unload_locked(self) -> None:
+        model = self._model
+        self._model = None
+        del model
+        gc.collect()
+        # The TTS backend is isolated from ComfyUI, so empty THIS process'
+        # CUDA allocator; ComfyUI's allocator cannot free another PID's memory.
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self._last_activity = time.monotonic()
+
+    def try_pause(self) -> bool:
+        """Nonblocking. Parent may terminate this worker if inference is active."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            self._paused = True
+            self._unload_locked()
+            return True
+        finally:
+            self._lock.release()
+
+    def resume(self) -> None:
+        with self._lock:
+            self._paused = False
+
+    def unload_if_idle(self, max_idle_seconds: float) -> bool:
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if self._model is None or time.monotonic() - self._last_activity < max_idle_seconds:
+                return False
+            self._unload_locked()
+            return True
+        finally:
+            self._lock.release()
 
     @property
     def loaded(self) -> bool:
@@ -32,13 +78,7 @@ class VoxEngine:
 
     def unload(self) -> None:
         with self._lock:
-            self._model = None
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
+            self._unload_locked()
 
     def generate(self, text: str, reference_path: Optional[str] = None,
                  reference_text: Optional[str] = None, description: Optional[str] = None,
@@ -47,7 +87,10 @@ class VoxEngine:
         if not text.strip():
             raise ValueError("Input text cannot be empty.")
         with self._lock:
+            if self._paused:
+                raise RuntimeError("TTS is paused while ComfyUI needs GPU memory")
             self._load()
+            self._last_activity = time.monotonic()
             kwargs = {"text": f"({description}){text}" if description else text,
                       "cfg_value": cfg, "inference_timesteps": steps}
             if seed is not None:
@@ -72,5 +115,6 @@ class VoxEngine:
                                    "real_time_factor": round(elapsed / duration, 3) if duration else None}
                 return buf.getvalue()
             finally:
+                self._last_activity = time.monotonic()
                 if self.unload_after_request:
-                    self.unload()
+                    self._unload_locked()
