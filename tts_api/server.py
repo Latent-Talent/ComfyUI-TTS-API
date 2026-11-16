@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import io
 import os
-import tempfile
-import wave
+import subprocess
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -39,7 +39,7 @@ class SpeechRequest(BaseModel):
     model: str = "voxcpm2"
     input: str = Field(min_length=1)
     voice: str = "default"
-    response_format: Literal["wav", "pcm"] = "wav"
+    response_format: Literal["wav", "mp3", "opus", "aac", "flac", "pcm"] = "mp3"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     instructions: str = ""
     seed: int | None = None
@@ -59,8 +59,6 @@ def _render(request: SpeechRequest) -> bytes:
         raise ValueError(f"Input longer than {MAX_TEXT} characters")
     if request.model not in ("voxcpm2", MODEL):
         raise ValueError("Unknown model. Supported model: voxcpm2")
-    if request.speed != 1.0:
-        raise ValueError("Speed control is not supported by the native VoxCPM2 backend")
     voice = None if request.voice == "default" else STORE.get(request.voice)
     if request.voice != "default" and voice is None:
         raise KeyError("Unknown voice ID")
@@ -104,11 +102,40 @@ async def speech(request: SpeechRequest):
         raise HTTPException(422, str(exc)) from exc
     except (RuntimeError, OSError) as exc:
         raise HTTPException(503, f"Speech generation failed: {exc}") from exc
+    if request.response_format == "wav" and request.speed == 1.0:
+        return Response(content=audio, media_type="audio/wav",
+                        headers={"Cache-Control": "no-store"})
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(503, "FFmpeg is required for this output format or speed")
+    codec = {"mp3": ("libmp3lame", "mp3", "audio/mpeg"),
+             "opus": ("libopus", "ogg", "audio/ogg"),
+             "aac": ("aac", "adts", "audio/aac"),
+             "flac": ("flac", "flac", "audio/flac"),
+             "pcm": ("pcm_s16le", "s16le", "application/octet-stream"),
+             "wav": ("pcm_s16le", "wav", "audio/wav")}
+    encoder, container, mime = codec[request.response_format]
+    args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-i", "pipe:0", "-vn"]
+    if request.speed != 1.0:
+        rate = request.speed
+        factors = []
+        while rate > 2:
+            factors.append(2.0)
+            rate /= 2
+        while rate < 0.5:
+            factors.append(0.5)
+            rate /= 0.5
+        factors.append(rate)
+        args += ["-af", ",".join(f"atempo={factor:.5f}" for factor in factors)]
     if request.response_format == "pcm":
-        # OpenAI PCM is raw signed 16-bit little-endian at 24 kHz.
-        # Native VoxCPM emits 48 kHz. Fail rather than silently mislabeling.
-        raise HTTPException(422, "PCM output is not yet supported; request wav")
-    return Response(content=audio, media_type="audio/wav",
+        args += ["-ar", "24000", "-ac", "1"]
+    args += ["-codec:a", encoder, "-f", container, "pipe:1"]
+    result = await anyio.to_thread.run_sync(
+        lambda: subprocess.run(args, input=audio, capture_output=True, timeout=120))
+    if result.returncode != 0:
+        raise HTTPException(503, "Audio conversion failed: " +
+                            result.stderr.decode("utf-8", errors="replace")[:300])
+    return Response(content=result.stdout, media_type=mime,
                     headers={"Cache-Control": "no-store"})
 
 
