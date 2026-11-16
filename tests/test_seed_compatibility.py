@@ -15,7 +15,7 @@ class LegacyVox:
         self.tts_model = types.SimpleNamespace(sample_rate=48000)
         self.received = []
 
-    def _generate(self, text, cfg_value=2.0, inference_timesteps=10):
+    def _generate(self, text, cfg_value=2.0, inference_timesteps=10, reference_wav_path=None):
         self.received.append(text)
         return np.random.standard_normal(4800).astype(np.float32) * 0.01
 
@@ -140,6 +140,9 @@ def test_voice_design_api_with_legacy_voxcpm(monkeypatch, tmp_path):
     voice = response.json()
     assert voice["name"] == "Narrator"
     assert server.STORE.audio_path(voice).exists()
+    # The only final sample synthesis input is the exact sample_text.
+    # Voice instructions are confined to an unheard scratch reference.
     assert engine._model.received == [
-        "(Deep, calm adult male voice.)Hello, this is my new voice."
+        "(Deep, calm adult male voice.)Hello there.",
+        "Hello, this is my new voice.",
     ]
