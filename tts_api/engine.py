@@ -56,6 +56,7 @@ class VoxEngine:
                 kwargs["reference_wav_path"] = reference_path
             if reference_text:
                 kwargs["prompt_text"] = reference_text
+                kwargs["prompt_wav_path"] = reference_path
             start = time.perf_counter()
             try:
                 signal = self._model.generate(**kwargs)
