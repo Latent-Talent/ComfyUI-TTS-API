@@ -110,3 +110,36 @@ def test_unrelated_type_error_is_not_swallowed(monkeypatch):
     with pytest.raises(TypeError, match="bad tensor shape"):
         engine.generate("Hello", seed=42)
     assert engine.last_error["type"] == "TypeError"
+
+
+def test_voice_design_api_with_legacy_voxcpm(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from tts_api import server
+
+    @contextmanager
+    def fake_fork_rng(devices):
+        yield
+
+    torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+        random=types.SimpleNamespace(fork_rng=fake_fork_rng),
+        manual_seed=lambda seed: None,
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(server, "STORE", server.VoiceStore(tmp_path))
+    engine = VoxEngine("legacy-model")
+    engine._model = LegacyVox()
+    monkeypatch.setattr(server, "ENGINE", engine)
+    response = TestClient(server.app).post("/api/voices/design", json={
+        "name": "Narrator",
+        "description": "Deep, calm adult male voice.",
+        "sample_text": "Hello, this is my new voice.",
+        "seed": 42,
+    })
+    assert response.status_code == 200, response.text
+    voice = response.json()
+    assert voice["name"] == "Narrator"
+    assert server.STORE.audio_path(voice).exists()
+    assert engine._model.received == [
+        "(Deep, calm adult male voice.)Hello, this is my new voice."
+    ]
