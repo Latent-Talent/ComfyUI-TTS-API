@@ -2,7 +2,7 @@
 
 Local text-to-speech for **ComfyUI** and **SillyTavern**, with voice cloning and natural-language voice design.
 
-**Status: first implementation (v0.1).** This version uses the official **VoxCPM2 Python API**. The speech model runs in a standalone Python virtual environment; ComfyUI communicates with it over HTTP. There is no application-layer profanity filter, text sanitizer, online moderation request, or required cloud service. A model may still omit or mispronounce some inputs. **Qwen3-TTS, vLLM-Omni acceleration, true token streaming, and multiprocess scheduling are not yet implemented.** This first version prioritizes a functional base and a stable API contract.
+**Status: early implementation (v0.2).** This version uses the official **VoxCPM2 Python API**. ComfyUI **automatically starts and stops** the API in a separate Python virtual environment; the speech model is loaded on demand and relinquishes VRAM when idle or another ComfyUI workflow needs the GPU. There is no application-layer profanity filter, text sanitizer, online moderation request, or required cloud service. A model may still omit or mispronounce some inputs. **Qwen3-TTS, vLLM-Omni acceleration, true token streaming, and multiprocess scheduling are not yet implemented.** This first version prioritizes a functional base and a stable API contract.
 
 ## Features
 
@@ -12,7 +12,9 @@ Local text-to-speech for **ComfyUI** and **SillyTavern**, with voice cloning and
 - Design a voice by textual description, synthesize a reference sample, and save it.
 - Persistent local voice IDs for mapping SillyTavern characters to voice profiles.
 - ComfyUI nodes: **TTS Generate (API)**, **TTS Clone Voice (API)**, **TTS Design Voice (API)**.
-- Lazy model loading and explicit `POST /api/model/unload`. Configurable unloading after each request.
+- Automatic API process start/stop with ComfyUI; no separate server startup command.
+- Lazy model loading, idle VRAM unloading (default 60 seconds), and prompt-triggered GPU preemption.
+- Explicit `POST /api/model/unload`, and configurable unloading after each request.
 - Seed, inference steps, CFG, and per-request delivery instructions.
 - FastAPI docs at `http://127.0.0.1:8025/docs`.
 - Optional authentication for LAN mode.
@@ -20,21 +22,22 @@ Local text-to-speech for **ComfyUI** and **SillyTavern**, with voice cloning and
 
 ## Linux / WSL installation
 
-This project must be cloned **inside** ComfyUI's `custom_nodes` directory for ComfyUI node discovery. The API process runs separately.
+Clone the project **inside** ComfyUI's `custom_nodes` directory for automatic service management and node discovery. The API runs in an isolated subprocess managed by ComfyUI.
 
 ```bash
 cd ~/ComfyUI/custom_nodes
 git clone https://github.com/Latent-Talent/ComfyUI-TTS-API.git
 cd ComfyUI-TTS-API
 bash install.sh
-bash start.sh
+
+# Then start or restart ComfyUI normally — no separate TTS server command.
 ```
 
 Requires an existing Python 3.12 executable, NVIDIA GPU for fast inference, and `ffmpeg` on PATH for MP3 output. The installation script uses Python 3.12 for this project's `.venv`; **it does not alter system Python or ComfyUI's virtual environment**. On WSL the first generation downloads model weights into your normal Hugging Face cache. GPU inference and CUDA/Torch compatibility must be checked on the target host; this code has not been run on your GPU.
 
-If Python 3.12 is installed under a different executable, run `PYTHON=/absolute/path/to/python3.12 bash install.sh`. Start the server separately from ComfyUI. Restart ComfyUI after installing the custom nodes.
+If Python 3.12 is installed under a different executable, run `PYTHON=/absolute/path/to/python3.12 bash install.sh`. There is **no need to run `start.sh`** while ComfyUI is running. Restart ComfyUI after installing the custom nodes; it will start the lightweight speech API automatically. Model weights load only on the first speech request.
 
-Copy `config.example.env` to `.env` (install.sh does this if missing) and edit `TTS_MODEL`, `TTS_API_KEY`, etc. `TTS_HOST` defaults to loopback. Use `bash start.sh --lan` to bind to `0.0.0.0`; LAN mode requires a configured `TTS_API_KEY`. Restrict the port with your firewall and preferably a VPN. Do not expose this service directly to the public internet.
+Copy `config.example.env` to `.env` (install.sh does this if missing) and edit `TTS_MODEL`, `TTS_API_KEY`, `TTS_IDLE_UNLOAD_SECONDS`, etc. `TTS_HOST` defaults to loopback. To serve SillyTavern on another LAN host automatically, set `TTS_HOST=0.0.0.0` and a nonempty `TTS_API_KEY` in `.env` before starting ComfyUI. LAN mode without a key is refused. `bash start.sh --lan` remains an **optional standalone mode** for use when ComfyUI is not running. Restrict the port with your firewall and preferably a VPN. Do not expose this service directly to the public internet.
 
 ## SillyTavern
 
@@ -46,7 +49,7 @@ Under **Extensions → TTS → OpenAI Compatible**, set:
 - Voice ID: `default` or a `voice_...` ID from `GET /v1/audio/voices`.
 - API key: the `TTS_API_KEY` from `.env`, if configured.
 
-If SillyTavern is on another machine, use the server's VPN/LAN IP instead of loopback. SillyTavern versions vary in how they populate voice dropdowns; voice IDs can be entered manually if auto-discovery is unavailable.
+If SillyTavern is on another machine, use the server's VPN/LAN IP instead of loopback. SillyTavern versions vary in how they populate voice dropdowns; voice IDs can be entered manually if auto-discovery is unavailable. **ComfyUI must remain running** to provide the automatically managed API. Standalone `start.sh` is available for independent service operation.
 
 ### Test it directly
 
@@ -105,6 +108,20 @@ Supported formats: `mp3`, `wav`, `opus` (Ogg container), `aac`, `flac`, `pcm` (2
 
 Voice management endpoints: `POST /api/voices/clone` (multipart), `POST /api/voices/design` (JSON), `GET /api/voices`, `DELETE /api/voices/{voice_id}`.
 
+## GPU memory and lifecycle
+
+- ComfyUI automatically starts the **API process** when the custom node loads. This uses only a small amount of host RAM; **no model is preloaded into VRAM**.
+- The first TTS or voice-design request loads VoxCPM2 onto the GPU. Subsequent requests reuse it while active.
+- After `TTS_IDLE_UNLOAD_SECONDS=60` seconds with no inference, the API unloads VoxCPM2 and frees its CUDA caching allocator.
+- When any non-TTS ComfyUI workflow is submitted, the node asks the API to **pause inference and release VoxCPM VRAM before the prompt enters the ComfyUI queue**. It resumes the TTS API after the ComfyUI queue is idle.
+- If the TTS worker is still generating and cannot release VRAM promptly, ComfyUI **terminates its own TTS process**, aborting the active audio response if necessary, and restarts it after the workflow is done. It never terminates an unrelated process already listening on the configured port.
+- In mixed workflows containing TTS and image/video nodes, the TTS node temporarily resumes the worker during its own generation and relinquishes it afterward.
+- When ComfyUI exits, the owned TTS process is stopped. An orphaned worker also exits after detecting its parent is gone.
+
+The speech backend runs in a separate process to avoid modifying ComfyUI's Torch installation. This means it is **not a native ComfyUI-managed model**; CUDA allocations cannot be freed directly from the ComfyUI process. Memory is coordinated through controlled unloads and process termination. SillyTavern requests arriving when ComfyUI is using most of the GPU may receive a temporary 503 or fail for insufficient VRAM; full two-way memory negotiation is future work.
+
+Set `TTS_AUTO_START=false` if you intentionally want to manage the TTS API independently. Set `TTS_IDLE_UNLOAD_SECONDS=0` to disable idle unloading, although ComfyUI prompt-triggered preemption will still apply to a managed worker.
+
 ### Tests
 
 ```bash
@@ -121,7 +138,7 @@ SillyTavern -- OpenAI speech JSON --> FastAPI --> VoxCPM2 --> MP3/WAV
 ComfyUI custom nodes -------------> FastAPI --> persisted character voice references
 ```
 
-Near-term priorities: Qwen3-TTS adapter; vLLM-Omni/Nano-vLLM accelerator behind identical endpoints; first-audio streaming; per-voice conditioning cache; GPU resource management for simultaneous ComfyUI image/video work; regression tests on an RTX 4090.
+Near-term priorities: Qwen3-TTS adapter; vLLM-Omni/Nano-vLLM accelerator behind identical endpoints; first-audio streaming; per-voice conditioning cache; better two-way GPU memory negotiation; regression tests on an RTX 4090.
 
 ### Safety and privacy
 
