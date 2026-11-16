@@ -76,7 +76,7 @@ class SpeechRequest(BaseModel):
     voice: str = "default"
     response_format: Literal["wav", "mp3", "opus", "aac", "flac", "pcm"] = "mp3"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
-    instructions: str = ""
+    instructions: str = Field(default="", max_length=1000)
     seed: int | None = None
     steps: int = Field(default=10, ge=1, le=100)
     cfg: float = Field(default=2.0, ge=0, le=10)
@@ -98,15 +98,13 @@ def _render(request: SpeechRequest) -> bytes:
     if request.voice != "default" and voice is None:
         raise KeyError("Unknown voice ID")
     ref = str(STORE.audio_path(voice)) if voice and voice.get("reference_file") else None
-    # VoxCPM2 takes voice/style instructions by prepending "(description)"
-    # to text, but some installations speak that control text aloud.
-    # Playback must *only* synthesize request.input. For saved voices, the
-    # stored audio reference already captures the designed timbre.
-    # The 'instructions' field is intentionally not injected until a backend
-    # offers a separate, non-spoken conditioning channel.
+    # Unlike direct VoxCPM2 prefixing, this produces ONLY request.input as
+    # final spoken text. A short, cached voice-reference pass carries delivery
+    # style separately when instructions are present.
     reference_text = voice.get("reference_text") if voice and ref else None
-    return ENGINE.generate(
-        request.input, reference_path=ref, reference_text=reference_text or None,
+    return ENGINE.generate_with_delivery(
+        request.input, instructions=request.instructions,
+        reference_path=ref, reference_text=reference_text or None,
         seed=request.seed, steps=request.steps, cfg=request.cfg
     )
 
