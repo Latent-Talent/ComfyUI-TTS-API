@@ -12,5 +12,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -e '.[test]'
-      - run: python -m compileall -q tts_api nodes.py __init__.py tests
+      - run: python -m compileall -q tts_api sidebar_routes.py managed_service.py __init__.py tests
+      - run: node --input-type=module --check < web/tts_sidebar.js
       - run: python -m pytest -q
