@@ -16,7 +16,6 @@ import os
 import secrets
 import signal
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -150,21 +149,16 @@ class ManagedTTS:
         environment = os.environ.copy()
         environment.update(self.config)
         environment["TTS_CONTROL_TOKEN"] = self.control_token
+        environment["TTS_PARENT_PID"] = str(os.getpid())
         environment["TTS_DATA_DIR"] = str(data_dir) if "TTS_DATA_DIR" not in self.config else self.config["TTS_DATA_DIR"]
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         kwargs = {"cwd": str(self.root), "env": environment,
                   "stdin": subprocess.DEVNULL, "stdout": self._log_handle,
                   "stderr": subprocess.STDOUT, "creationflags": creationflags}
         if os.name == "posix":
+            # No Python preexec_fn: forking with ComfyUI's many active threads
+            # could otherwise deadlock. The service monitors TTS_PARENT_PID.
             kwargs["start_new_session"] = True
-            if sys.platform.startswith("linux"):
-                def on_parent_exit():
-                    import ctypes
-                    libc = ctypes.CDLL(None)
-                    libc.prctl(1, signal.SIGTERM)
-                    if os.getppid() == 1:
-                        os._exit(1)
-                kwargs["preexec_fn"] = on_parent_exit
         try:
             self._process = subprocess.Popen(
                 [str(executable), "-m", "uvicorn", "tts_api.server:app",
