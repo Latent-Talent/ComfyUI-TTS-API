@@ -189,6 +189,8 @@ Completed history entries identify the job as **TTS · Speech completed** or **T
 
 The TTS API process remains online when idle. Model weights are loaded when requested and automatically released after 60 seconds idle by default (`TTS_IDLE_UNLOAD_SECONDS`). ComfyUI may request cached model memory to be released for another workflow. The separate TTS process uses a native CUDA allocator to avoid VoxCPM2 allocator incompatibilities.
 
+**ComfyUI Manager restart:** Manager may restart ComfyUI by replacing the running Python process without changing its PID. The managed TTS worker watches a dedicated parent-liveness pipe (which closes on process replacement), so it shuts down even on this kind of restart. A single-worker lock prevents a second TTS worker from launching while the old one exits. The new ComfyUI instance retries startup when the old worker is gone; only one managed API is intended to run at a time. Normal ComfyUI restarts therefore start a *replacement* API process, not another simultaneous copy.
+
 The standalone `bash start.sh` command runs without ComfyUI queue coordination. Do not run the standalone and managed service simultaneously on the same port.
 
 ## Configuration and security
