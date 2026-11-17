@@ -22,15 +22,65 @@ def test_auto_start_is_default_and_all_workflows_preempt_tts(tmp_path):
     assert triggered == [True]
 
 
-def test_unresponsive_owned_worker_is_terminated(tmp_path):
+def test_transient_reclaim_failure_does_not_terminate_healthy_worker(tmp_path):
     manager = ManagedTTS(root=tmp_path)
     calls = []
     manager._running = lambda: True
-    manager._request = lambda path, timeout=2.0: calls.append(path) or False
+    manager._request_reclaim = lambda timeout=2.0: calls.append("reclaim") or "unreachable"
+    manager._healthy = lambda: True
     manager._terminate = lambda: calls.append("terminated")
     manager.reserve_for_comfy()
     assert manager._reserved
-    assert calls == ["/api/internal/reclaim", "terminated"]
+    assert manager._reclaim_pending
+    assert calls == ["reclaim"]
+    manager._yield_gpu()
+    manager._yield_gpu()
+    assert calls == ["reclaim", "reclaim", "reclaim"]
+
+
+def test_reclaim_busy_deferred_without_termination(tmp_path):
+    manager = ManagedTTS(root=tmp_path)
+    calls = []
+    manager._running = lambda: True
+    manager._request_reclaim = lambda timeout=2.0: calls.append("busy") or "busy"
+    manager._terminate = lambda: calls.append("terminated")
+    for _ in range(4):
+        manager._yield_gpu()
+    assert calls == ["busy"] * 4
+    assert manager._reclaim_pending
+    assert manager._reclaim_failures == 0
+
+
+def test_reclaim_eventually_recovers_without_restart(tmp_path):
+    manager = ManagedTTS(root=tmp_path)
+    outcomes = iter(["unreachable", "busy", "reclaimed"])
+    calls = []
+    manager._running = lambda: True
+    manager._request_reclaim = lambda timeout=2.0: next(outcomes)
+    manager._terminate = lambda: calls.append("terminated")
+    manager._yield_gpu()
+    assert manager._reclaim_pending
+    manager._yield_gpu()
+    assert manager._reclaim_pending
+    manager._yield_gpu()
+    assert not manager._reclaim_pending
+    assert manager._reclaim_failures == 0
+    assert calls == []
+
+
+def test_unhealthy_worker_only_terminated_after_three_failed_reclaims(tmp_path):
+    manager = ManagedTTS(root=tmp_path)
+    calls = []
+    manager._running = lambda: True
+    manager._request_reclaim = lambda timeout=2.0: "unreachable"
+    manager._healthy = lambda: False
+    manager._terminate = lambda: calls.append("terminated")
+    manager._yield_gpu()
+    manager._yield_gpu()
+    assert calls == []
+    manager._yield_gpu()
+    assert calls == ["terminated"]
+    assert not manager._reclaim_pending
 
 
 def test_local_url_detection(tmp_path):
@@ -77,11 +127,11 @@ def test_normal_comfy_workflow_reclaims_without_pausing_or_restarting(tmp_path):
     manager = ManagedTTS(root=tmp_path)
     calls = []
     manager._running = lambda: True
-    manager._request = lambda path, timeout=2.0: calls.append(path) or True
+    manager._request_reclaim = lambda timeout=2.0: calls.append("reclaim") or "reclaimed"
     manager._terminate = lambda: calls.append("terminate")
     manager._spawn = lambda: calls.append("spawn")
     manager.on_prompt({"prompt": {"1": {"class_type": "KSampler"}}})
-    assert calls == ["/api/internal/reclaim"]
+    assert calls == ["reclaim"]
     assert manager._reserved
 
 
