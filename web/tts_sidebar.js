@@ -368,6 +368,9 @@ function mount(container) {
         put("[data-test-seed]", "seed");
         put("[data-test-steps]", "steps");
         put("[data-test-delivery]", "instructions");
+        if (!("instructions" in values)) {
+            $("[data-test-delivery]").value = "";
+        }
         put("[data-index-emo-mode]", "emotion_mode");
         put("[data-index-emo-strength]", "emotion_strength");
         put("[data-index-duration]", "duration_factor");
@@ -596,12 +599,37 @@ function mount(container) {
         "Speech API is restarting."));
     $("[data-test-model]").addEventListener("change", () => {
         updateTestModelNote();
-        refreshVoices().catch((err) => feedback(err.message, true));
+        refreshVoices().then(applyTestDefaults)
+            .catch((err) => feedback(err.message, true));
     });
     $("[data-selected-model]").addEventListener("change", () => {
         updateModelDownloadButton();
         renderModelDefaults();
     });
+    $("[data-action=save-model-defaults]").addEventListener("click", (e) => perform(
+        e.currentTarget, async () => {
+            const payload = readModelDefaults();
+            const response = await (await request("/models/defaults", {
+                method: "POST", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(payload),
+            })).json();
+            defaultsByModel[payload.model_id].values = response.settings;
+            renderModelDefaults();
+            if ($("[data-test-model]").value === payload.model_id) applyTestDefaults();
+        }, "Defaults saved for this model. New API requests use them unless explicitly overridden."
+    ));
+    $("[data-action=reset-model-defaults]").addEventListener("click", (e) => perform(
+        e.currentTarget, async () => {
+            const modelId = $("[data-selected-model]").value;
+            const response = await (await request("/models/defaults", {
+                method: "POST", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({model_id: modelId, settings: {}, reset: true}),
+            })).json();
+            defaultsByModel[modelId].values = response.settings;
+            renderModelDefaults();
+            if ($("[data-test-model]").value === modelId) applyTestDefaults();
+        }, "Built-in defaults restored for this model."
+    ));
     $("[data-index-emo-mode]").addEventListener("change", updateEmotionControls);
     updateEmotionControls();
     $("[data-action=apply-model]").addEventListener("click", (e) => perform(
@@ -717,7 +745,8 @@ function mount(container) {
                 voice: $("[data-test-voice]").value,
                 input: $("[data-test-text]").value,
                 instructions: $("[data-test-delivery]").value.trim(),
-                seed: Number($("[data-test-seed]").value),
+                seed: $("[data-test-seed]").value.trim() === ""
+                    ? null : Number($("[data-test-seed]").value),
                 steps: Number($("[data-test-steps]").value),
             };
             if (body.model === "indextts-2.5") {
@@ -749,6 +778,8 @@ function mount(container) {
         }, "Generation complete."));
 
     refreshModels().catch((e) => feedback(e.message, true));
+    refreshModelDefaults().then(() => refreshVoices().then(applyTestDefaults))
+        .catch((e) => feedback(e.message, true));
     refreshDownloadStatus().catch(() => {});
     refreshStatus().catch((e) => feedback(e.message, true));
     timer = window.setInterval(() => {
