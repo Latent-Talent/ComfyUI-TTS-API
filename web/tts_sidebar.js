@@ -189,6 +189,9 @@ function mount(container) {
     let modelList = [{ id: "voxcpm2", label: "VoxCPM2", kind: "voxcpm" }];
     let modelChoicesInitialized = false;
     let defaultsByModel = {};
+    let savedVoices = [];
+    let renderedDefaultsModel = null;
+    const pendingAudio = new Map();
     let downloadStatus = null;
     let latestCompletedDownload = null;
     const emotionNames = ["happy", "angry", "sad", "afraid", "disgusted",
@@ -243,14 +246,78 @@ function mount(container) {
         refreshVoices().catch(() => {});
     }
 
-    function renderModelDefaults() {
+    // Audio inputs are browser-local until Save defaults. Only the registered
+    // saved voice ID is persisted; file bytes never enter the JSON profile.
+    function audioKey(modelId, fieldName) {
+        return modelId + ":" + fieldName;
+    }
+
+    function fillVoiceOptions(select, spec, modelId, value) {
+        select.replaceChildren();
+        const isEmotion = spec.name === "emotion_reference_voice";
+        const needsSaved = isEmotion || modelId === "indextts-2.5";
+        select.add(new Option(needsSaved ? "Select saved audio" : "Default voice",
+            needsSaved ? "" : "default"));
+        if (!isEmotion && modelId.startsWith("qwen3-tts") &&
+            modelId.endsWith("customvoice")) {
+            for (const speaker of qwenSpeakers) {
+                select.add(new Option("Qwen · " + speaker, speaker));
+            }
+        }
+        for (const voice of savedVoices) {
+            if (!voice.reference_file) continue;
+            select.add(new Option("Saved · " + (voice.name || voice.id), voice.id));
+        }
+        if (value && ![...select.options].some((o) => o.value === value)) {
+            // Retain manually entered values or a deleted recording so the
+            // user can correct them rather than silently substituting a voice.
+            select.add(new Option("Unavailable · " + value, value));
+        }
+        select.value = needsSaved && value === "default" ? "" : (value || (needsSaved ? "" : "default"));
+    }
+
+    function refreshDefaultVoiceOptions() {
+        const modelId = $("[data-selected-model]").value;
+        const profile = defaultsByModel[modelId];
+        if (!profile) return;
+        for (const spec of profile.fields.filter((f) => f.kind === "audio_voice")) {
+            const select = $("[data-model-defaults-fields]")
+                .querySelector('[data-default-field="' + spec.name + '"]');
+            if (select) fillVoiceOptions(select, spec, modelId, select.value);
+        }
+    }
+
+    function updateDefaultFieldVisibility() {
+        const modelId = $("[data-selected-model]").value;
+        const profile = defaultsByModel[modelId];
+        if (!profile) return;
+        const form = $("[data-model-defaults-fields]");
+        for (const spec of profile.fields) {
+            const row = form.querySelector('[data-default-row="' + spec.name + '"]');
+            if (!row) continue;
+            const conditions = spec.visible_when || {};
+            row.hidden = Object.entries(conditions).some(([field, allowed]) => {
+                const source = form.querySelector('[data-default-field="' + field + '"]');
+                return source && !allowed.includes(source.value);
+            });
+        }
+    }
+
+    function renderModelDefaults(force = false) {
         const target = $("[data-model-defaults-fields]");
-        target.replaceChildren();
         const selected = $("[data-selected-model]").value;
         const profile = defaultsByModel[selected];
         const save = $("[data-action=save-model-defaults]");
         const reset = $("[data-action=reset-model-defaults]");
         save.disabled = reset.disabled = !profile;
+        if (!force && selected === renderedDefaultsModel &&
+            profile && target.querySelector("[data-default-row]")) {
+            refreshDefaultVoiceOptions();
+            updateDefaultFieldVisibility();
+            return;
+        }
+        target.replaceChildren();
+        renderedDefaultsModel = selected;
         if (!profile) {
             const info = document.createElement("p");
             info.className = "tts-muted";
@@ -259,13 +326,11 @@ function mount(container) {
             return;
         }
         for (const spec of profile.fields) {
-            // A vector is a group of individual labels, not a label nesting
-            // eight more labels. Other controls have one associated label.
-            const label = document.createElement(spec.kind === "vector" ? "div" : "label");
+            const group = spec.kind === "vector" || spec.kind === "audio_voice";
+            const label = document.createElement(group ? "div" : "label");
             label.className = "tts-default-field";
-            if (spec.kind === "textarea" || spec.kind === "vector") {
-                label.classList.add("is-wide");
-            }
+            label.dataset.defaultRow = spec.name;
+            if (group || spec.kind === "textarea") label.classList.add("is-wide");
             const name = document.createElement("span");
             name.textContent = spec.label;
             label.append(name);
@@ -273,7 +338,6 @@ function mount(container) {
             let control;
             if (spec.kind === "vector") {
                 control = document.createElement("div");
-                control.dataset.defaultField = spec.name;
                 control.className = "tts-emotion-grid";
                 spec.emotions.forEach((emotion, index) => {
                     const emotionLabel = document.createElement("label");
@@ -288,10 +352,75 @@ function mount(container) {
                     emotionLabel.append(input);
                     control.append(emotionLabel);
                 });
+            } else if (spec.kind === "audio_voice") {
+                control = document.createElement("select");
+                fillVoiceOptions(control, spec, selected, String(value || ""));
+                const chooser = document.createElement("label");
+                chooser.className = "tts-audio-picker";
+                const heading = document.createElement("span");
+                heading.textContent = "Or choose an audio file";
+                const fileInput = document.createElement("input");
+                fileInput.type = "file";
+                fileInput.accept = "audio/*,.wav,.flac,.ogg,.mp3,.aiff";
+                fileInput.dataset.audioFile = spec.name;
+                const consent = document.createElement("label");
+                consent.className = "tts-audio-consent";
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.dataset.audioConsent = spec.name;
+                const consentText = document.createElement("span");
+                consentText.textContent = "I have permission to use this recording";
+                consent.append(checkbox, consentText);
+                const fileNote = document.createElement("small");
+                fileNote.className = "tts-muted";
+                const key = audioKey(selected, spec.name);
+                const pending = pendingAudio.get(key);
+                if (pending) {
+                    fileNote.textContent = "Will upload on Save: " + pending.file.name;
+                    checkbox.checked = pending.consent;
+                }
+                consent.hidden = !pending;
+                chooser.append(heading, fileInput);
+                const selectLabel = document.createElement("label");
+                selectLabel.className = "tts-audio-saved";
+                selectLabel.textContent = "Saved recordings";
+                selectLabel.append(control);
+                label.append(selectLabel, chooser, consent, fileNote);
+                fileInput.addEventListener("change", () => {
+                    const file = fileInput.files?.[0];
+                    if (file) {
+                        pendingAudio.set(key, {file, consent: false});
+                        checkbox.checked = false;
+                        consent.hidden = false;
+                        fileNote.textContent = "Will upload on Save: " + file.name;
+                    } else {
+                        pendingAudio.delete(key);
+                        consent.hidden = true;
+                        fileNote.textContent = "";
+                    }
+                });
+                checkbox.addEventListener("change", () => {
+                    const current = pendingAudio.get(key);
+                    if (current) current.consent = checkbox.checked;
+                });
+                control.addEventListener("change", () => {
+                    pendingAudio.delete(key);
+                    fileInput.value = "";
+                    consent.hidden = true;
+                    checkbox.checked = false;
+                    fileNote.textContent = "";
+                });
             } else if (spec.kind === "select") {
                 control = document.createElement("select");
                 spec.options.forEach((choice) => {
-                    control.add(new Option(choice, choice));
+                    const text = spec.name === "emotion_mode" ? ({
+                        neutral: "Neutral",
+                        auto: "Automatic emotion analysis",
+                        text: "Emotion description",
+                        vector: "Manual emotion vector",
+                        reference: "Reference audio",
+                    }[choice] || choice) : choice;
+                    control.add(new Option(text, choice));
                 });
                 control.value = String(value);
             } else if (spec.kind === "textarea") {
@@ -307,13 +436,11 @@ function mount(container) {
                 if (spec.max !== undefined) control.max = String(spec.max);
                 if (spec.step !== undefined) control.step = String(spec.step);
                 if (spec.max_length !== undefined) control.maxLength = spec.max_length;
-                if (spec.kind === "integer" || spec.kind === "nullable_integer") {
-                    control.step = "1";
-                }
+                if (spec.kind === "integer" || spec.kind === "nullable_integer") control.step = "1";
                 control.value = value == null ? "" : String(value);
             }
             control.dataset.defaultField = spec.name;
-            label.append(control);
+            if (spec.kind !== "audio_voice") label.append(control);
             if (spec.hint) {
                 const hint = document.createElement("small");
                 hint.className = "tts-muted";
@@ -321,6 +448,42 @@ function mount(container) {
                 label.append(hint);
             }
             target.append(label);
+        }
+        // Use visibility instead of rebuilding when changing emotion mode:
+        // values for hidden modes remain intact while exploring the menu.
+        target.addEventListener("change", updateDefaultFieldVisibility, {once: true});
+        updateDefaultFieldVisibility();
+    }
+
+    async function uploadPendingDefaultAudio(payload) {
+        const modelId = payload.model_id;
+        const profile = defaultsByModel[modelId];
+        for (const spec of profile.fields.filter((f) => f.kind === "audio_voice")) {
+            const key = audioKey(modelId, spec.name);
+            const pending = pendingAudio.get(key);
+            if (!pending) continue;
+            const row = $("[data-model-defaults-fields]")
+                .querySelector('[data-default-row="' + spec.name + '"]');
+            if (row?.hidden) continue;
+            if (!pending.consent) {
+                throw new Error("Confirm permission to use " + spec.label + " before saving.");
+            }
+            if (pending.file.size > 20 * 1024 * 1024) {
+                throw new Error("Audio file exceeds 20 MB; select a shorter recording.");
+            }
+            const form = new FormData();
+            const friendlyName = pending.file.name.replace(/\.[^.]+$/, "").slice(0, 120)
+                || "TTS reference";
+            form.append("name", friendlyName);
+            form.append("reference_text", "");
+            form.append("consent", "true");
+            form.append("audio", pending.file);
+            const voice = await (await request("/voices/clone", {
+                method: "POST", body: form,
+            })).json();
+            payload.settings[spec.name] = voice.id;
+            pendingAudio.delete(key);
+            savedVoices.push(voice);
         }
     }
 
