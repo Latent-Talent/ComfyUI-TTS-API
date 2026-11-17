@@ -25,21 +25,28 @@ from pydantic import BaseModel, Field
 from .engine import VoxEngine
 from .storage import VoiceStore
 from .qwen_engine import QwenEngine
+from .index_engine import IndexEngine
+from .model_storage import configure_model_storage, hf_hub_cache, index_checkpoints, index_python, model_root
 from .comfy_queue import QueueUnavailable, queued_tts
 from .operations import REQUEST_ID, configure as configure_operations, emit
 from .models import (
     VOX_ID, QWEN_DEFAULT, QWEN_DESIGN, QWEN_MODELS, QWEN_SPEAKERS,
     QWEN_SPEAKERS_LOOKUP, OPENAI_MODEL_ALIASES, OPENAI_VOICE_ALIASES,
-    canonical_model, is_qwen, qwen_base_for, model_catalog,
+    canonical_model, is_qwen, is_index, qwen_base_for, model_catalog,
+    INDEX_ID, INDEX_REPO,
 )
 
 LOG = logging.getLogger("comfyui-tts-api.server")
 
+MODEL_ROOT = configure_model_storage()
 ROOT = Path(os.environ.get("TTS_DATA_DIR", "./data")).expanduser().resolve()
 STORE = VoiceStore(ROOT / "voices")
 MODEL = os.environ.get("TTS_MODEL", "openbmb/VoxCPM2")
 ENGINE = VoxEngine(MODEL, os.getenv("TTS_UNLOAD_AFTER_REQUEST", "false").lower() == "true")
 QWEN_ENGINE = QwenEngine(
+    os.getenv("TTS_UNLOAD_AFTER_REQUEST", "false").lower() == "true"
+)
+INDEX_ENGINE = IndexEngine(
     os.getenv("TTS_UNLOAD_AFTER_REQUEST", "false").lower() == "true"
 )
 ACTIVE_MODEL = canonical_model(
@@ -68,6 +75,7 @@ async def _reap_idle_model():
         if IDLE_SECONDS:
             await anyio.to_thread.run_sync(ENGINE.unload_if_idle, IDLE_SECONDS)
             await anyio.to_thread.run_sync(QWEN_ENGINE.unload_if_idle, IDLE_SECONDS)
+            await anyio.to_thread.run_sync(INDEX_ENGINE.unload_if_idle, IDLE_SECONDS)
 
 
 @asynccontextmanager
@@ -85,6 +93,7 @@ async def lifespan(app: FastAPI):
             pass
         await anyio.to_thread.run_sync(ENGINE.unload)
         await anyio.to_thread.run_sync(QWEN_ENGINE.unload)
+        await anyio.to_thread.run_sync(INDEX_ENGINE.unload)
         emit("service.stopped", reason="shutdown")
 
 
@@ -140,6 +149,11 @@ class SpeechRequest(BaseModel):
     steps: int = Field(default=10, ge=1, le=100)
     cfg: float = Field(default=2.0, ge=0, le=10)
     language: str = Field(default="Auto", max_length=40)
+    emotion_mode: Literal["neutral", "vector", "auto", "text", "reference"] = "neutral"
+    emotion_vector: list[float] | None = Field(default=None, min_length=8, max_length=8)
+    emotion_strength: float = Field(default=0.65, ge=0, le=1)
+    emotion_reference_voice: str | None = Field(default=None, max_length=120)
+    duration_factor: float = Field(default=1.0, ge=0.5, le=2.0)
 
 
 class DesignRequest(BaseModel):
@@ -209,15 +223,46 @@ def _render(request: SpeechRequest) -> bytes:
     ref = str(STORE.audio_path(voice)) if voice and voice.get("reference_file") else None
     reference_text = voice.get("reference_text") if voice and ref else None
     emit("generation.started", model=model_id,
-         backend="qwen3-tts" if is_qwen(model_id) else "voxcpm2",
+         backend="indextts" if is_index(model_id) else ("qwen3-tts" if is_qwen(model_id) else "voxcpm2"),
          voice_type="saved" if voice is not None
          else ("preset" if is_qwen(model_id) else "default"),
          has_reference=bool(ref), has_instructions=bool(request.instructions),
          characters=len(request.input), steps=request.steps if not is_qwen(model_id) else 0)
 
-    # All backend switching occurs inside this serialized section. No two GPU
-    # models are retained across VoxCPM / Qwen3-TTS requests.
+    # All backend switching occurs inside this serialized section.
     with INFERENCE_LOCK:
+        if is_index(model_id):
+            if not ref:
+                raise ValueError("IndexTTS requires a saved voice reference. Upload a voice first.")
+            if ENGINE.loaded:
+                ENGINE.unload()
+            if QWEN_ENGINE.loaded:
+                QWEN_ENGINE.unload()
+            emo_ref = None
+            if request.emotion_mode == "reference":
+                ref_voice = _resolve_voice(request.emotion_reference_voice or "default", backend=model_id)
+                if ref_voice is None or not ref_voice.get("reference_file"):
+                    raise ValueError("Select a saved emotion-reference voice")
+                emo_ref = str(STORE.audio_path(ref_voice))
+            mode = request.emotion_mode
+            # Existing clients send free-form "instructions" for emotion.
+            # Treat these as an explicit description rather than ignoring them.
+            if mode == "neutral" and request.instructions.strip():
+                mode = "text"
+            result = INDEX_ENGINE.generate(
+                request.input, reference_path=ref, language=request.language,
+                instructions=request.instructions, emotion_mode=mode,
+                emotion_vector=request.emotion_vector, emotion_strength=request.emotion_strength,
+                emotion_reference=emo_ref, duration_factor=request.duration_factor,
+                seed=request.seed,
+            )
+            emit("generation.completed", model=INDEX_ID, backend="indextts",
+                 audio_bytes=len(result),
+                 audio_seconds=INDEX_ENGINE.last_stats.get("audio_seconds", 0.0),
+                 elapsed_ms=INDEX_ENGINE.last_stats.get("seconds", 0.0) * 1000)
+            return result
+        if INDEX_ENGINE.loaded:
+            INDEX_ENGINE.unload()
         if is_qwen(model_id):
             if ENGINE.loaded:
                 emit("model.switch", backend="qwen3-tts",
@@ -256,24 +301,28 @@ def _render(request: SpeechRequest) -> bytes:
 @app.get("/health")
 async def health():
     qwen_running = QWEN_ENGINE.loaded
+    index_running = INDEX_ENGINE.loaded
     return {
         "ok": True, "service": "comfyui-tts-api", "version": app.version,
         "model": ACTIVE_MODEL, "active_model": ACTIVE_MODEL,
-        "loaded_model": QWEN_ENGINE.loaded_model if qwen_running else (VOX_ID if ENGINE.loaded else None),
+        "loaded_model": INDEX_ID if index_running else (QWEN_ENGINE.loaded_model if qwen_running else (VOX_ID if ENGINE.loaded else None)),
         "voxcpm_checkpoint": MODEL,
         "qwen_installed": importlib.util.find_spec("qwen_tts") is not None,
         "qwen_loaded": qwen_running,
+        "index_installed": index_python().is_file(),
+        "index_loaded": index_running,
+        "model_storage": str(MODEL_ROOT),
         "cuda_allocator": os.environ.get(
             "PYTORCH_ALLOC_CONF",
             os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "backend:native"),
         ),
-        "loaded": ENGINE.loaded or qwen_running,
-        "paused": ENGINE.paused or QWEN_ENGINE.paused,
+        "loaded": ENGINE.loaded or qwen_running or index_running,
+        "paused": ENGINE.paused or QWEN_ENGINE.paused or INDEX_ENGINE.paused,
         "compile_enabled": ENGINE.optimize,
         "compile_fallback_used": ENGINE.compile_fallback_used,
-        "last_error": QWEN_ENGINE.last_error if qwen_running else ENGINE.last_error,
+        "last_error": INDEX_ENGINE.last_error if index_running else (QWEN_ENGINE.last_error if qwen_running else ENGINE.last_error),
         "idle_unload_seconds": IDLE_SECONDS,
-        "last_stats": QWEN_ENGINE.last_stats if qwen_running else ENGINE.last_stats,
+        "last_stats": INDEX_ENGINE.last_stats if index_running else (QWEN_ENGINE.last_stats if qwen_running else ENGINE.last_stats),
         "voice_count": len(STORE.list()),
     }
 
@@ -286,13 +335,15 @@ def _authorize_control(value: str | None):
 def _pause_both() -> bool:
     vox_ok = ENGINE.try_pause()
     qwen_ok = QWEN_ENGINE.try_pause()
-    return vox_ok and qwen_ok
+    index_ok = INDEX_ENGINE.try_pause()
+    return vox_ok and qwen_ok and index_ok
 
 
 def _resume_both() -> bool:
-    was_paused = ENGINE.paused or QWEN_ENGINE.paused
+    was_paused = ENGINE.paused or QWEN_ENGINE.paused or INDEX_ENGINE.paused
     ENGINE.resume()
     QWEN_ENGINE.resume()
+    INDEX_ENGINE.resume()
     return was_paused
 
 
@@ -300,6 +351,7 @@ def _unload_both():
     with INFERENCE_LOCK:
         ENGINE.unload()
         QWEN_ENGINE.unload()
+        INDEX_ENGINE.unload()
 
 
 def _reclaim_idle_gpu() -> tuple[bool, bool]:
@@ -313,10 +365,11 @@ def _reclaim_idle_gpu() -> tuple[bool, bool]:
     if not INFERENCE_LOCK.acquire(blocking=False):
         return False, False
     try:
-        was_loaded = ENGINE.loaded or QWEN_ENGINE.loaded
+        was_loaded = ENGINE.loaded or QWEN_ENGINE.loaded or INDEX_ENGINE.loaded
         if was_loaded:
             ENGINE.unload()
             QWEN_ENGINE.unload()
+            INDEX_ENGINE.unload()
         return True, was_loaded
     finally:
         INFERENCE_LOCK.release()
@@ -338,7 +391,7 @@ async def internal_pause(x_tts_control_token: str | None = Header(default=None))
         emit("worker.pause_blocked", reason="workflow", status="error")
         raise HTTPException(409, "TTS is currently generating audio")
     emit("worker.paused", reason="workflow", status="paused")
-    return {"paused": True, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded}
+    return {"paused": True, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded or INDEX_ENGINE.loaded}
 
 
 @app.post("/api/internal/resume", include_in_schema=False)
@@ -347,13 +400,14 @@ async def internal_resume(x_tts_control_token: str | None = Header(default=None)
     was_paused = await anyio.to_thread.run_sync(_resume_both)
     if was_paused:
         emit("worker.resumed", reason="workflow", status="running")
-    return {"paused": False, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded}
+    return {"paused": False, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded or INDEX_ENGINE.loaded}
 
 
 @app.get("/v1/models", dependencies=[Depends(authenticate)])
 async def models():
     return {"object": "list", "data": [
         {"id": VOX_ID, "object": "model", "owned_by": "local"},
+        {"id": INDEX_ID, "object": "model", "owned_by": "local-index-tts"},
         *[{"id": name, "object": "model", "owned_by": "local-qwen3-tts"}
           for name in QWEN_MODELS],
         *[{"id": alias, "object": "model",
@@ -381,16 +435,22 @@ async def list_models():
         from huggingface_hub import try_to_load_from_cache
         for record in models:
             if "repo" in record:
-                cached = try_to_load_from_cache(record["repo"], "config.json")
-                record["cache_detected"] = isinstance(cached, str)
+                if record["id"] == INDEX_ID:
+                    record["cache_detected"] = (index_checkpoints() / "config.yaml").is_file()
+                else:
+                    cached = try_to_load_from_cache(record["repo"], "config.json", cache_dir=str(hf_hub_cache()))
+                    record["cache_detected"] = isinstance(cached, str)
     except ImportError:
         pass
     return {
         "active_model": ACTIVE_MODEL,
         "models": models,
         "qwen_installed": importlib.util.find_spec("qwen_tts") is not None,
-        "loaded_model": QWEN_ENGINE.loaded_model if QWEN_ENGINE.loaded
-                        else (VOX_ID if ENGINE.loaded else None),
+        "index_installed": index_python().is_file(),
+        "model_storage": str(MODEL_ROOT),
+        "loaded_model": INDEX_ID if INDEX_ENGINE.loaded else
+                        (QWEN_ENGINE.loaded_model if QWEN_ENGINE.loaded
+                         else (VOX_ID if ENGINE.loaded else None)),
     }
 
 
@@ -401,7 +461,10 @@ class ModelDownloadRequest(BaseModel):
 def _download_model(model_id: str) -> None:
     try:
         from huggingface_hub import snapshot_download
-        snapshot_download(QWEN_MODELS[model_id]["repo"])
+        if model_id == INDEX_ID:
+            snapshot_download(INDEX_REPO, local_dir=str(index_checkpoints()))
+        else:
+            snapshot_download(QWEN_MODELS[model_id]["repo"], cache_dir=str(hf_hub_cache()))
     except Exception as exc:
         emit("download.failed", model=model_id, error_type=type(exc).__name__)
         with DOWNLOAD_LOCK:
@@ -419,8 +482,8 @@ def _download_model(model_id: str) -> None:
 
 @app.post("/api/models/download", dependencies=[Depends(authenticate)])
 async def download_model(request: ModelDownloadRequest):
-    if request.model_id not in QWEN_MODELS:
-        raise HTTPException(422, "Select one of the supported Qwen model IDs")
+    if request.model_id not in QWEN_MODELS and request.model_id != INDEX_ID:
+        raise HTTPException(422, "Select a supported Qwen or IndexTTS model ID")
     with DOWNLOAD_LOCK:
         if DOWNLOAD_STATUS["state"] == "downloading":
             raise HTTPException(
@@ -434,7 +497,7 @@ async def download_model(request: ModelDownloadRequest):
         emit("download.started", model=request.model_id)
         threading.Thread(
             target=_download_model, args=(request.model_id,),
-            name="TTS-Qwen-HF-Download", daemon=True,
+            name="TTS-Weights-Download", daemon=True,
         ).start()
         return dict(DOWNLOAD_STATUS)
 
@@ -472,7 +535,7 @@ async def _speech_in_queue(request: SpeechRequest):
         # contain user input in their argument values.
         emit("generation.failed", error_type=type(exc).__name__, kind="speech")
         resolved = canonical_model(request.model, ACTIVE_MODEL, MODEL)
-        engine = QWEN_ENGINE if is_qwen(resolved) else ENGINE
+        engine = INDEX_ENGINE if is_index(resolved) else (QWEN_ENGINE if is_qwen(resolved) else ENGINE)
         if engine.last_error is None:
             engine.last_error = {"stage": "speech_api",
                                  "type": type(exc).__name__, "message": str(exc)[:1000]}
@@ -555,7 +618,14 @@ def _design_voice(request: DesignRequest):
     emit("voice.design.started", model=QWEN_DESIGN if is_qwen(selected) else VOX_ID,
          backend="qwen3-tts" if is_qwen(selected) else "voxcpm2",
          characters=len(request.sample_text), has_instructions=True)
+    if is_index(selected):
+        raise ValueError(
+            "IndexTTS 2.5 clones a saved recording; it does not design a new voice "
+            "from a text description. Use Voices → Clone."
+        )
     with INFERENCE_LOCK:
+        if INDEX_ENGINE.loaded:
+            INDEX_ENGINE.unload()
         if is_qwen(selected):
             # VoiceDesign is a dedicated checkpoint. The resulting reference
             # is stored as an ordinary persistent voice and cloned by Base.
@@ -584,6 +654,8 @@ async def design_voice(request: DesignRequest):
 async def _design_voice_in_queue(request: DesignRequest):
     try:
         audio = await anyio.to_thread.run_sync(_design_voice, request)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
     except Exception as exc:
         emit("voice.design.failed", error_type=type(exc).__name__, kind="voice_design")
         raise HTTPException(503, f"Voice design failed: {exc}") from exc
