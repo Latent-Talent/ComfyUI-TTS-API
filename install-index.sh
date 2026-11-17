@@ -10,11 +10,43 @@ INDEX_ROOT="$MODELS_DIR/IndexTTS-2.5"
 SOURCE="$INDEX_ROOT/source"
 mkdir -p "$INDEX_ROOT/checkpoints" "$MODELS_DIR/huggingface"
 
-if ! command -v uv >/dev/null 2>&1; then
-  echo "IndexTTS requires uv. Install uv first using https://docs.astral.sh/uv/getting-started/installation/." >&2
-  echo "This installer will not change your existing Python installation." >&2
-  exit 1
+# Prefer an existing uv binary (including a previous user-local
+# installation). If none is found, install a private standalone copy under
+# models/TTS/IndexTTS-2.5/tools. No pip, system Python, sudo, or changes to
+# shell startup files are needed.
+UV_BIN=""
+if command -v uv >/dev/null 2>&1; then
+  UV_BIN="$(command -v uv)"
+elif [[ -x "$INDEX_ROOT/tools/uv" ]]; then
+  UV_BIN="$INDEX_ROOT/tools/uv"
+elif [[ -x "$HOME/.local/bin/uv" ]]; then
+  UV_BIN="$HOME/.local/bin/uv"
+elif [[ -x "$HOME/.cargo/bin/uv" ]]; then
+  UV_BIN="$HOME/.cargo/bin/uv"
+else
+  echo "uv not found. Installing a private copy for IndexTTS..."
+  installer="$(mktemp)"
+  trap 'rm -f "$installer"' EXIT
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --silent --show-error --location \
+      https://astral.sh/uv/install.sh --output "$installer"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --quiet --output-document="$installer" \
+      https://astral.sh/uv/install.sh
+  else
+    echo "Install uv using https://docs.astral.sh/uv/getting-started/installation/ (requires curl or wget)." >&2
+    exit 1
+  fi
+  # Official Astral installer with explicitly scoped, unmanaged destination.
+  # UV_UNMANAGED_INSTALL skips changes to shell profiles and PATH.
+  env UV_UNMANAGED_INSTALL="$INDEX_ROOT/tools" sh "$installer"
+  UV_BIN="$INDEX_ROOT/tools/uv"
+  if [[ ! -x "$UV_BIN" ]]; then
+    echo "uv standalone installer did not create $UV_BIN" >&2
+    exit 1
+  fi
 fi
+echo "Using uv: $UV_BIN"
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required to fetch the official IndexTTS source." >&2
   exit 1
@@ -32,7 +64,7 @@ fi
 
 # uv installs its Python 3.11 interpreter into its own managed directory; this
 # does not replace or modify the system Python, or ComfyUI's Python 3.12.
-uv python install 3.11
+"$UV_BIN" python install 3.11
 
 export HF_HOME="$MODELS_DIR/huggingface"
 export HF_HUB_CACHE="$HF_HOME/hub"
@@ -41,7 +73,7 @@ export MODELSCOPE_CACHE="$MODELS_DIR/modelscope"
 echo "Installing IndexTTS 2.5 dependencies in $SOURCE/.venv (Python 3.11)"
 (
   cd "$SOURCE"
-  uv sync --python 3.11 --no-dev
+  "$UV_BIN" sync --python 3.11 --no-dev
 )
 "$SOURCE/.venv/bin/python" -c 'from indextts.infer_v2_5 import IndexTTS2; print("IndexTTS 2.5 backend import succeeded")'
 
