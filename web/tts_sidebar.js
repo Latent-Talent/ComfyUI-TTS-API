@@ -211,6 +211,7 @@ function mount(container) {
             panel.hidden = panel.dataset.panel !== name);
         feedback("");
         if (name === "voices" || name === "test") refreshVoices().catch((e) => feedback(e.message, true));
+        if (name === "server") refreshModels().catch(() => {});
     }
     root.querySelectorAll("[data-tab]").forEach((tab) =>
         tab.addEventListener("click", () => activeTab(tab.dataset.tab)));
@@ -576,7 +577,12 @@ function mount(container) {
         } catch (e) {
             feedback(e.message || "Operation failed.", true);
         } finally {
-            if (!destroyed) button.disabled = false;
+            if (!destroyed) {
+                button.disabled = false;
+                if (button.matches('[data-action="download-model"]')) {
+                    updateModelDownloadButton();
+                }
+            }
             refreshStatus().catch(() => {});
         }
     }
@@ -605,6 +611,9 @@ function mount(container) {
     $("[data-selected-model]").addEventListener("change", () => {
         updateModelDownloadButton();
         renderModelDefaults();
+        // Refresh on-disk download state, including auto-downloads triggered
+        // outside the sidebar, whenever the selected model changes.
+        refreshModels().catch(() => {});
     });
     $("[data-action=save-model-defaults]").addEventListener("click", (e) => perform(
         e.currentTarget, async () => {
