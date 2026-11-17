@@ -31,6 +31,7 @@ from .model_storage import (
     index_weights_downloaded, model_root, qwen_weights_downloaded,
 )
 from .model_defaults import all_defaults, effective_defaults, save_defaults
+from .memory import process_cuda_memory
 from .comfy_queue import QueueUnavailable, queued_tts
 from .operations import REQUEST_ID, configure as configure_operations, emit
 from .models import (
@@ -314,6 +315,13 @@ async def health():
         "qwen_loaded": qwen_running,
         "index_installed": index_python().is_file(),
         "index_loaded": index_running,
+        "cuda_memory": process_cuda_memory(),
+        "index_memory": {
+            "separate_process": True,
+            "loaded": index_running,
+            "pid": INDEX_ENGINE._process.pid if index_running else None,
+            "note": "IndexTTS CUDA usage is owned by a separate Python process",
+        },
         "model_storage": str(MODEL_ROOT),
         "cuda_allocator": os.environ.get(
             "PYTORCH_ALLOC_CONF",
