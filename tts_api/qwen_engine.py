@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from .operations import emit
+
 from .models import QWEN_MODELS, QWEN_SPEAKERS_LOOKUP
 
 LOG = logging.getLogger("comfyui-tts-api.qwen")
@@ -48,6 +50,7 @@ class QwenEngine:
         return self._paused
 
     def _unload_locked(self) -> None:
+        previous = self._model_id if self._model is not None else None
         self._prompt_cache.clear()
         model = self._model
         self._model = None
@@ -58,6 +61,8 @@ class QwenEngine:
         if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
         self._last_activity = time.monotonic()
+        if previous:
+            emit("model.unloaded", backend="qwen3-tts", model=previous)
 
     def unload(self) -> None:
         with self._lock:
@@ -111,10 +116,18 @@ class QwenEngine:
             "attn_implementation": "sdpa" if is_cuda else "eager",
         }
         repo = QWEN_MODELS[model_id]["repo"]
-        LOG.info("[TTS API] Loading %s (downloads weights on first use)", repo)
-        self._model = Qwen3TTSModel.from_pretrained(repo, **kwargs)
+        emit("model.load.started", backend="qwen3-tts", model=model_id)
+        started = time.perf_counter()
+        try:
+            self._model = Qwen3TTSModel.from_pretrained(repo, **kwargs)
+        except Exception as exc:
+            emit("model.load.failed", backend="qwen3-tts", model=model_id,
+                 error_type=type(exc).__name__,
+                 elapsed_ms=(time.perf_counter() - started) * 1000)
+            raise
         self._model_id = model_id
-        LOG.info("[TTS API] Loaded %s", repo)
+        emit("model.load.completed", backend="qwen3-tts", model=model_id,
+             elapsed_ms=(time.perf_counter() - started) * 1000)
 
     @staticmethod
     def _encode(wavs, sample_rate: int) -> bytes:
@@ -205,6 +218,8 @@ class QwenEngine:
                         )
                         prompt = self._prompt_cache.get(cache_key)
                         if prompt is None:
+                            emit("style.reference.started", backend="qwen3-tts",
+                                 model=model_id, cached=False)
                             prompt = self._model.create_voice_clone_prompt(
                                 ref_audio=str(path),
                                 ref_text=reference_text or None,
@@ -213,8 +228,12 @@ class QwenEngine:
                             self._prompt_cache[cache_key] = prompt
                             while len(self._prompt_cache) > 8:
                                 self._prompt_cache.popitem(last=False)
+                            emit("style.reference.completed", backend="qwen3-tts",
+                                 model=model_id, cached=False)
                         else:
                             self._prompt_cache.move_to_end(cache_key)
+                            emit("style.reference.cached", backend="qwen3-tts",
+                                 model=model_id, cached=True)
                         wavs, sr = self._model.generate_voice_clone(
                             text=text, language=language,
                             voice_clone_prompt=prompt,
@@ -233,7 +252,8 @@ class QwenEngine:
             except Exception as exc:
                 self.last_error = {"stage": "qwen_generation", "type": type(exc).__name__,
                                    "message": str(exc)[:1000]}
-                LOG.exception("[TTS API] Qwen3-TTS generation failed")
+                emit("generation.failed", backend="qwen3-tts",
+                     model=model_id, error_type=type(exc).__name__)
                 raise
             finally:
                 self._last_activity = time.monotonic()
