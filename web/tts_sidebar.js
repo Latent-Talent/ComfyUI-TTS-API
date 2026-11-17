@@ -56,7 +56,7 @@ function template() {
         </select></label>
         <div class="tts-actions">
           <button type="button" data-action="apply-model">Make API default</button>
-          <button type="button" data-action="download-model">Download Qwen weights</button>
+          <button type="button" data-action="download-model">Download model weights</button>
         </div>
         <p class="tts-hint" data-model-hint>Models load on demand. Switching the default restarts only the managed TTS API, not ComfyUI.</p>
         <p class="tts-hint" data-download-status>No model download active.</p>
@@ -120,6 +120,7 @@ function template() {
           <option value="German">German</option>
           <option value="French">French</option>
           <option value="Spanish">Spanish</option>
+          <option value="Arabic">Arabic</option>
           <option value="Italian">Italian</option>
           <option value="Portuguese">Portuguese</option>
           <option value="Russian">Russian</option>
@@ -131,6 +132,36 @@ function template() {
           <label>Seed<input data-test-seed type="number" value="42" min="0" max="2147483647"></label>
           <label>Steps<input data-test-steps type="number" value="10" min="1" max="100"></label>
         </div>
+
+        <details data-index-emotion hidden class="tts-accordion">
+          <summary>IndexTTS 2.5 · Emotion and timing</summary>
+          <p class="tts-hint">Requires a saved voice recording. Auto and Description use the built-in emotion analyzer.</p>
+          <label>Emotion mode<select data-index-emo-mode>
+            <option value="neutral">Neutral</option>
+            <option value="auto">Automatically analyze speech text</option>
+            <option value="text">Use delivery instructions as emotion description</option>
+            <option value="vector">Manual 8-value vector</option>
+            <option value="reference">Emotion from a second saved voice</option>
+          </select></label>
+          <label data-index-emo-ref-row hidden>Emotion reference<select data-index-emo-reference><option value="default">Select saved voice</option></select></label>
+          <div data-index-emo-vector-row hidden>
+            <p class="tts-hint">Intensity 0–1 for each emotion.</p>
+            <div class="tts-emotion-grid">
+              <label>Happy<input type="number" data-emotion="happy" min="0" max="1" step="0.05" value="0"></label>
+              <label>Angry<input type="number" data-emotion="angry" min="0" max="1" step="0.05" value="0"></label>
+              <label>Sad<input type="number" data-emotion="sad" min="0" max="1" step="0.05" value="0"></label>
+              <label>Afraid<input type="number" data-emotion="afraid" min="0" max="1" step="0.05" value="0"></label>
+              <label>Disgusted<input type="number" data-emotion="disgusted" min="0" max="1" step="0.05" value="0"></label>
+              <label>Melancholic<input type="number" data-emotion="melancholic" min="0" max="1" step="0.05" value="0"></label>
+              <label>Surprised<input type="number" data-emotion="surprised" min="0" max="1" step="0.05" value="0"></label>
+              <label>Calm<input type="number" data-emotion="calm" min="0" max="1" step="0.05" value="0"></label>
+            </div>
+          </div>
+          <div class="tts-test-row">
+            <label>Emotion strength<input data-index-emo-strength type="number" min="0" max="1" step="0.05" value="0.65"></label>
+            <label>Duration factor<input data-index-duration type="number" min="0.5" max="2" step="0.05" value="1"></label>
+          </div>
+        </details>
         <p class="tts-hint" data-test-model-note>Qwen3-TTS has separate CustomVoice, VoiceDesign, and Base checkpoints. Saved voice references use Base automatically.</p>
         <button type="button" class="tts-primary" data-action="generate">Generate speech</button>
         <audio data-audio controls hidden></audio>
@@ -148,6 +179,8 @@ function mount(container) {
     let destroyed = false;
     let modelList = [{ id: "voxcpm2", label: "VoxCPM2", kind: "voxcpm" }];
     let modelChoicesInitialized = false;
+    const emotionNames = ["happy", "angry", "sad", "afraid", "disgusted",
+                          "melancholic", "surprised", "calm"];
     const qwenSpeakers = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric",
                           "Ryan", "Aiden", "Ono_Anna", "Sohee"];
     const $ = (selector) => root.querySelector(selector);
@@ -192,18 +225,38 @@ function mount(container) {
         }
         modelChoicesInitialized = true;
         updateTestModelNote();
+        updateModelDownloadButton();
         refreshVoices().catch(() => {});
+    }
+
+    function updateModelDownloadButton() {
+        const id = $("[data-selected-model]").value;
+        const button = $("[data-action=download-model]");
+        button.disabled = id === "voxcpm2";
+        button.textContent = id === "indextts-2.5"
+            ? "Download IndexTTS 2.5 weights" : id.startsWith("qwen3-tts")
+                ? "Download Qwen weights" : "Weights managed by VoxCPM";
+    }
+
+    function updateEmotionControls() {
+        const mode = $("[data-index-emo-mode]").value;
+        $("[data-index-emo-vector-row]").hidden = mode !== "vector";
+        $("[data-index-emo-ref-row]").hidden = mode !== "reference";
     }
 
     function updateTestModelNote() {
         const id = $("[data-test-model]").value;
         const note = $("[data-test-model-note]");
         const qwen = id.startsWith("qwen3-tts");
-        $("[data-test-steps]").disabled = qwen;
-        $("[data-test-steps]").title = qwen
-            ? "Qwen3-TTS does not use VoxCPM inference steps"
+        const index = id === "indextts-2.5";
+        $("[data-index-emotion]").hidden = !index;
+        $("[data-test-steps]").disabled = qwen || index;
+        $("[data-test-steps]").title = qwen || index
+            ? "This backend does not use VoxCPM inference steps"
             : "VoxCPM2 inference steps";
-        if (id.endsWith("-base")) {
+        if (index) {
+            note.textContent = "IndexTTS requires a saved voice recording. English, Chinese, Japanese, Spanish, Arabic (Auto chooses English). Emotion controls are optional.";
+        } else if (id.endsWith("-base")) {
             note.textContent = "Base clones saved recordings only. Delivery instructions and VoxCPM steps are not available.";
         } else if (id.endsWith("-voicedesign")) {
             note.textContent = "VoiceDesign uses delivery instructions as a separate voice description. Saved voices use Base automatically.";
@@ -220,10 +273,10 @@ function mount(container) {
         const status = await (await request("/models/download/status")).json();
         if (destroyed) return;
         const box = $("[data-download-status]");
-        if (status.state === "downloading") box.textContent = "Downloading " + status.model_id + " to Hugging Face cache. Check the TTS worker log for detailed progress.";
+        if (status.state === "downloading") box.textContent = "Downloading " + status.model_id + " under models/TTS. Check TTS worker logs for progress.";
         else if (status.state === "complete") box.textContent = "Downloaded: " + status.model_id;
         else if (status.state === "failed") box.textContent = "Download failed for " + status.model_id + ": " + status.error;
-        else box.textContent = "Qwen weights download on first use or by clicking Download.";
+        else box.textContent = "Weights stored in ComfyUI/models/TTS. IndexTTS needs Download weights first.";
     }
 
     async function refreshStatus() {
@@ -240,9 +293,11 @@ function mount(container) {
         $("[data-service]").textContent = ok ? (result.running ? "Managed · online" : "External · online") : "Offline";
         $("[data-model]").textContent = h?.loaded_model || h?.active_model || h?.model || "VoxCPM2";
         const modelSelected = $("[data-selected-model]").value;
-        $("[data-model-hint]").textContent = h?.qwen_installed === false && modelSelected.startsWith("qwen3-tts")
+        $("[data-model-hint]").textContent = h?.index_installed === false && modelSelected === "indextts-2.5"
+            ? "IndexTTS missing: run bash install-index.sh (isolated Python 3.11), then Download weights."
+            : h?.qwen_installed === false && modelSelected.startsWith("qwen3-tts")
             ? "Qwen runtime missing: run bash install-qwen.sh in the TTS custom node folder, then restart its API. Model weights download separately."
-            : "Selecting a model as API default restarts only the TTS service. SillyTavern tts-1 aliases follow this default.";
+            : "Selecting a default restarts only the TTS service. Models are stored under ComfyUI/models/TTS.";
         $("[data-action=apply-model]").disabled = result.active_model_editable === false;
         $("[data-version]").textContent = h?.version || "Older release";
         $("[data-memory]").textContent = !ok ? "Unavailable" : h.paused ? "Released / paused" : h.loaded ? "Loaded in VRAM" : "Unloaded";
@@ -270,6 +325,9 @@ function mount(container) {
         list.replaceChildren();
         const select = $("[data-test-voice]");
         const choice = select.value;
+        const emotionSelect = $("[data-index-emo-reference]");
+        const previousEmotionRef = emotionSelect.value;
+        emotionSelect.replaceChildren(new Option("Select saved voice", "default"));
         select.replaceChildren(new Option("Default voice", "default"));
         const chosenModel = $("[data-test-model]").value;
         if (chosenModel.startsWith("qwen3-tts") && chosenModel.endsWith("customvoice")) {
@@ -317,9 +375,11 @@ function mount(container) {
             item.append(details, tools);
             list.append(item);
             select.add(new Option(voice.name || voice.id, voice.id));
+            emotionSelect.add(new Option(voice.name || voice.id, voice.id));
         }
         if ([...select.options].some((option) => option.value === choice)) select.value = choice;
-        if (chosenModel.endsWith("-base") && select.value === "default" && voices.length) {
+        if ([...emotionSelect.options].some((option) => option.value === previousEmotionRef)) emotionSelect.value = previousEmotionRef;
+        if ((chosenModel.endsWith("-base") || chosenModel === "indextts-2.5") && select.value === "default" && voices.length) {
             select.value = voices[0].id;
         }
     }
@@ -358,6 +418,9 @@ function mount(container) {
         updateTestModelNote();
         refreshVoices().catch((err) => feedback(err.message, true));
     });
+    $("[data-selected-model]").addEventListener("change", updateModelDownloadButton);
+    $("[data-index-emo-mode]").addEventListener("change", updateEmotionControls);
+    updateEmotionControls();
     $("[data-action=apply-model]").addEventListener("click", (e) => perform(
         e.currentTarget, async () => {
             const id = $("[data-selected-model]").value;
@@ -374,8 +437,8 @@ function mount(container) {
     $("[data-action=download-model]").addEventListener("click", (e) => perform(
         e.currentTarget, async () => {
             const id = $("[data-selected-model]").value;
-            if (!id.startsWith("qwen3-tts")) {
-                throw new Error("Choose a Qwen3-TTS model to download.");
+            if (!id.startsWith("qwen3-tts") && id !== "indextts-2.5") {
+                throw new Error("Choose a Qwen3-TTS or IndexTTS model to download.");
             }
             await request("/models/download", {
                 method: "POST", headers: { "Content-Type": "application/json" },
@@ -473,6 +536,20 @@ function mount(container) {
                 seed: Number($("[data-test-seed]").value),
                 steps: Number($("[data-test-steps]").value),
             };
+            if (body.model === "indextts-2.5") {
+                body.emotion_mode = $("[data-index-emo-mode]").value;
+                body.emotion_strength = Number($("[data-index-emo-strength]").value);
+                body.duration_factor = Number($("[data-index-duration]").value);
+                if (body.emotion_mode === "vector") {
+                    body.emotion_vector = emotionNames.map(
+                        (name) => Number(root.querySelector('[data-emotion="' + name + '"]').value));
+                } else if (body.emotion_mode === "reference") {
+                    body.emotion_reference_voice = $("[data-index-emo-reference]").value;
+                }
+                if (body.voice === "default") {
+                    throw new Error("IndexTTS needs a saved voice. Upload a recording under Voices → Clone.");
+                }
+            }
             if (!body.input.trim()) throw new Error("Enter text to speak.");
             const response = await request("/speech", {
                 method: "POST", headers: { "Content-Type": "application/json" },
