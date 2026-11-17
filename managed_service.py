@@ -1,9 +1,10 @@
 """Lifecycle and GPU coordination for the optional ComfyUI-managed TTS service.
 
-ComfyUI starts a lightweight API process, NOT the GPU model. On other workflow
-submissions, the API unloads VoxCPM and pauses new inference. If it is busy and
-cannot release promptly, the owned worker is terminated; it restarts after
-ComfyUI becomes idle. The daemon watches the real ComfyUI prompt queue.
+ComfyUI starts a lightweight API process, NOT the GPU model. ComfyUI and
+managed TTS requests share the real prompt queue. When an ordinary workflow
+needs GPU memory, only cached TTS model weights are reclaimed: the idle API
+process stays online, and no unnecessary pause/resume cycle occurs. If GPU
+reclaim fails, only the owned worker can be terminated.
 
 The managed child is never an arbitrary service discovered on the port.
 """
@@ -473,27 +474,30 @@ class ManagedTTS:
                     from queue_bridge import BROKER
                 tts_active = BROKER.active()
                 tts_queued = BROKER.outstanding()
-                busy = not tts_active and (
-                    self._queue_has_real_running() or
-                    (not tts_queued and self._queue_busy())
-                )
+                # Pending workflows are not using the GPU; their submission
+                # already triggered one cache-reclaim attempt via on_prompt.
+                # Do not repeatedly pause an idle API while they sit queued.
+                busy = not tts_active and self._queue_has_real_running()
                 if busy and not self._reserved:
                     self._reserved = True
                     self._hold_until = time.monotonic() + 1
                     self._yield_gpu()
                 if (self._reserved and not busy and
                         time.monotonic() >= self._hold_until):
+                    # Reclaiming cached weights is NOT a persistent pause.
+                    # Only respawn if a failed reclaim actually stopped the
+                    # owned process; otherwise leave the idle API untouched.
                     if not self._running():
                         self._spawn()
-                    if self._running() and self._request("/api/internal/resume"):
+                    if self._running():
                         self._reserved = False
 
     def _yield_gpu(self):
-        """Must hold self._lock. Fail closed: stop OUR worker if it cannot unload."""
+        """Must hold self._lock. Reclaim cached models without pausing the API."""
         if not self._running():
             return
-        if not self._request("/api/internal/pause", timeout=2.0):
-            LOG.warning("[TTS API] Worker busy/unresponsive; terminating to free ComfyUI VRAM")
+        if not self._request("/api/internal/reclaim", timeout=2.0):
+            LOG.warning("[TTS API] GPU reclaim failed; stopping owned TTS worker to free VRAM")
             self._terminate()
 
     def reserve_for_comfy(self):
@@ -514,8 +518,9 @@ class ManagedTTS:
         prompt = payload.get("prompt", {}) if isinstance(payload, dict) else {}
         if not isinstance(prompt, dict) or not prompt:
             return payload
-        # This extension exposes a sidebar and a speech API, no workflow nodes.
-        # Any submitted ComfyUI workflow gets the GPU ahead of background TTS.
+        # ComfyUI workflows and speech requests already share one queue.
+        # Reclaim idle cached TTS weights for an upcoming workflow, but never
+        # pause/restart the lightweight API server just for a queue change.
         self.reserve_for_comfy()
         return payload
 
