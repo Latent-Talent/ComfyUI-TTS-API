@@ -32,7 +32,6 @@ function template() {
         <button type="button" class="is-active" data-tab="server">Server</button>
         <button type="button" data-tab="voices">Voices</button>
         <button type="button" data-tab="test">Test</button>
-        <button type="button" data-tab="activity">Activity</button>
       </nav>
       <div class="tts-panel" data-panel="server">
         <div class="tts-section-title">Inference service</div>
@@ -136,17 +135,6 @@ function template() {
         <button type="button" class="tts-primary" data-action="generate">Generate speech</button>
         <audio data-audio controls hidden></audio>
       </div>
-      <div class="tts-panel" data-panel="activity" hidden>
-        <div class="tts-section-title">TTS activity · no speech content</div>
-        <p class="tts-hint">Shows model loading, voice operations, request status, durations, and failures. Input text, instructions, transcripts and API keys are never added to this event log.</p>
-        <div class="tts-actions">
-          <button type="button" data-action="refresh-activity">Refresh</button>
-          <button type="button" data-action="copy-activity">Copy events</button>
-        </div>
-        <p class="tts-hint" data-activity-status>Retrieving recent events…</p>
-        <pre class="tts-activity-list" data-activity-list aria-label="Recent TTS activity" tabindex="0">No events yet.</pre>
-        <p class="tts-hint">Auto-updates every 4 seconds while this tab is open. Full sanitized events: <code>data/operations.log</code>. Raw Python library output remains in <code>data/managed-server.log</code>.</p>
-      </div>
       <div class="tts-feedback" role="status" aria-live="polite" hidden></div>
     </section>`;
 }
@@ -178,38 +166,10 @@ function mount(container) {
             panel.hidden = panel.dataset.panel !== name);
         feedback("");
         if (name === "voices" || name === "test") refreshVoices().catch((e) => feedback(e.message, true));
-        if (name === "activity") refreshActivity().catch((e) => feedback(e.message, true));
     }
     root.querySelectorAll("[data-tab]").forEach((tab) =>
         tab.addEventListener("click", () => activeTab(tab.dataset.tab)));
 
-
-    async function refreshActivity() {
-        const response = await (await request("/operations")).json();
-        if (destroyed) return;
-        const records = Array.isArray(response.events) ? response.events : [];
-        const output = $("[data-activity-list]");
-        const nearBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 25;
-        const lines = records.map((entry) => {
-            const timestamp = String(entry.time || "").replace("T", " ").replace("+00:00", "Z");
-            const type = String(entry.event || "event");
-            const id = entry.request_id ? " #" + entry.request_id : "";
-            const parts = [];
-            for (const key of ["model", "backend", "voice_type", "kind", "reason",
-                               "characters", "steps", "audio_seconds", "audio_bytes",
-                               "sample_rate", "elapsed_ms", "rtf", "cached",
-                               "has_reference", "has_instructions", "format",
-                               "status", "error_type"]) {
-                if (entry[key] !== undefined) {
-                    parts.push(key + "=" + String(entry[key]));
-                }
-            }
-            return timestamp + "  " + type + id + (parts.length ? "  " + parts.join(" ") : "");
-        });
-        output.textContent = lines.length ? lines.join("\n") : "No TTS activity recorded yet.";
-        $("[data-activity-status]").textContent = records.length + " recent sanitized events.";
-        if (nearBottom) output.scrollTop = output.scrollHeight;
-    }
 
     async function refreshModels() {
         const data = await (await request("/models")).json();
@@ -382,16 +342,6 @@ function mount(container) {
         refreshStatus().catch((e) => feedback(e.message, true)));
     $("[data-action=refresh-voices]").addEventListener("click", () =>
         refreshVoices().catch((e) => feedback(e.message, true)));
-    $("[data-action=refresh-activity]").addEventListener("click", () =>
-        refreshActivity().catch((e) => feedback(e.message, true)));
-    $("[data-action=copy-activity]").addEventListener("click", async () => {
-        try {
-            await navigator.clipboard.writeText($("[data-activity-list]").textContent);
-            feedback("Sanitized activity events copied.");
-        } catch (_) {
-            feedback("Unable to copy activity events.", true);
-        }
-    });
     $("[data-action=copy-url]").addEventListener("click", async () => {
         try {
             await navigator.clipboard.writeText($("[data-endpoint]").textContent);
@@ -544,9 +494,6 @@ function mount(container) {
         if (!destroyed && document.visibilityState !== "hidden") {
             refreshStatus().catch(() => {});
             refreshDownloadStatus().catch(() => {});
-            if (!root.querySelector('[data-panel="activity"]').hidden) {
-                refreshActivity().catch(() => {});
-            }
         }
     }, 4000);
 
