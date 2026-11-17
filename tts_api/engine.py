@@ -20,6 +20,7 @@ import soundfile as sf
 
 from .operations import emit
 from .comfy_queue import active_request_kind, require_queue_reservation
+from .memory import release_unused_cuda
 
 LOG = logging.getLogger("comfyui-tts-api.engine")
 
@@ -50,6 +51,7 @@ class VoxEngine:
         self.compile_fallback_used = False
         self._style_cache: OrderedDict[tuple, bytes] = OrderedDict()
         self._paused = False
+        self._retain_model_depth = 0
         self._last_activity = time.monotonic()
 
     @property
@@ -61,12 +63,8 @@ class VoxEngine:
         model = self._model
         self._model = None
         del model
-        gc.collect()
-        # The TTS backend is isolated from ComfyUI, so empty THIS process'
-        # CUDA allocator; ComfyUI's allocator cannot free another PID's memory.
-        torch = sys.modules.get("torch")
-        if torch is not None and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # This process owns its allocator; ComfyUI's CUDA context is separate.
+        release_unused_cuda()
         self._last_activity = time.monotonic()
         if previously_loaded:
             emit("model.unloaded", backend="voxcpm2", model="voxcpm2")
@@ -101,6 +99,18 @@ class VoxEngine:
     def loaded(self) -> bool:
         return self._model is not None
 
+    @contextmanager
+    def _generation_session(self):
+        """Keep weights resident for both passes of a single TTS operation."""
+        with self._lock:
+            self._retain_model_depth += 1
+            try:
+                yield
+            finally:
+                self._retain_model_depth -= 1
+                if self._retain_model_depth == 0 and self.unload_after_request:
+                    self._unload_locked()
+
     def _load(self) -> None:
         if self._model is None:
             require_queue_reservation()
@@ -113,6 +123,10 @@ class VoxEngine:
                     self.model_name, load_denoiser=False, optimize=self.optimize
                 )
             except Exception as exc:
+                # from_pretrained may allocate CUDA tensors before raising,
+                # even when self._model has never been assigned.
+                self._model = None
+                release_unused_cuda()
                 emit("model.load.failed", backend="voxcpm2",
                      model="voxcpm2", error_type=type(exc).__name__,
                      elapsed_ms=(time.perf_counter() - load_started) * 1000)
@@ -218,7 +232,7 @@ class VoxEngine:
             raise ValueError("A non-empty text is required")
         if len(style) > 1000:
             raise ValueError("Delivery instructions must be 1000 characters or fewer")
-        with self._lock:
+        with self._generation_session():
             source_version = None
             if reference_path:
                 info = os.stat(reference_path)
@@ -281,7 +295,7 @@ class VoxEngine:
         clean_description = description.strip().replace("(", "").replace(")", "")
         if not clean_description:
             raise ValueError("Voice description cannot consist only of parentheses")
-        with self._lock:
+        with self._generation_session():
             # Never play or persist the scratch conditioning utterance.
             scratch_audio = self.generate(
                 "Hello there.", description=clean_description,
@@ -382,5 +396,5 @@ class VoxEngine:
                 raise
             finally:
                 self._last_activity = time.monotonic()
-                if self.unload_after_request:
+                if self.unload_after_request and self._retain_model_depth == 0:
                     self._unload_locked()
