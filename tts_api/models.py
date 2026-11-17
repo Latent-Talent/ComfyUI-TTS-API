@@ -7,6 +7,12 @@ from __future__ import annotations
 VOX_ID = "voxcpm2"
 QWEN_DEFAULT = "qwen3-tts-1.7b-customvoice"
 QWEN_DESIGN = "qwen3-tts-1.7b-voicedesign"
+INDEX_ID = "indextts-2.5"
+INDEX_REPO = "IndexTeam/IndexTTS-2.5"
+INDEX_EMOTIONS = (
+    "happy", "angry", "sad", "afraid", "disgusted",
+    "melancholic", "surprised", "calm",
+)
 
 QWEN_MODELS = {
     "qwen3-tts-1.7b-customvoice": {
@@ -54,14 +60,20 @@ def canonical_model(requested: str | None, default: str = VOX_ID,
         return VOX_ID
     if candidate in QWEN_MODELS:
         return candidate
+    if candidate in (INDEX_ID, "indextts", "indextts2.5"):
+        return INDEX_ID
     if candidate == "qwen3-tts":
         return QWEN_DEFAULT
     if candidate in OPENAI_MODEL_ALIASES or not candidate:
         return default
     raise ValueError(
-        f"Unknown model {candidate!r}. Choose voxcpm2, qwen3-tts, "
+        f"Unknown model {candidate!r}. Choose voxcpm2, qwen3-tts, indextts-2.5, "
         "or one of the IDs returned by /v1/models."
     )
+
+
+def is_index(model_id: str) -> bool:
+    return model_id == INDEX_ID
 
 
 def is_qwen(model_id: str) -> bool:
@@ -79,6 +91,9 @@ def model_catalog() -> list[dict]:
     return [
         {"id": VOX_ID, "label": "VoxCPM2", "kind": "voxcpm",
          "features": ["speech", "voice_design", "clone"]},
+        {"id": INDEX_ID, "label": "IndexTTS · 2.5 (emotion + cloning)",
+         "kind": "indextts", "size": "2.5", "repo": INDEX_REPO,
+         "features": ["speech", "clone", "emotion_vectors", "emotion_from_text"]},
         *[
             {"id": name, "label": info["label"], "kind": info["kind"],
              "size": info["size"], "repo": info["repo"]}
