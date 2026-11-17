@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import stat
 
@@ -12,6 +13,7 @@ import pytest
 import soundfile as sf
 
 from tts_api import operations, server
+from managed_service import ManagedTTS
 
 
 def fake_wav():
@@ -73,7 +75,7 @@ def test_log_history_persists_and_truncates_to_requested_limit(activity_log):
     assert len(operations.recent(200)) == 4
 
 
-def test_operations_endpoint_redacts_text_and_returns_model_progress(activity_log, monkeypatch, tmp_path):
+def test_request_events_redact_text_and_preserve_request_correlation(activity_log, monkeypatch, tmp_path):
     private = "SPEAK-THIS-WORD-FOR-WORD-NEVER-LOG-IT"
     monkeypatch.setattr(server, "STORE", server.VoiceStore(tmp_path / "voices"))
     monkeypatch.setattr(server, "_render", lambda request: fake_wav())
@@ -83,10 +85,9 @@ def test_operations_endpoint_redacts_text_and_returns_model_progress(activity_lo
         "instructions": "DELICATE-DELIVERY-CONTENT-DO-NOT-LOG",
     })
     assert result.status_code == 200
-    events = TestClient(server.app).get("/api/operations?limit=100")
-    assert events.status_code == 200
-    assert events.json()["text_logged"] is False
-    history = events.json()["events"]
+    # Events are internal and go to the ComfyUI console, not the sidebar.
+    assert TestClient(server.app).get("/api/operations?limit=100").status_code == 404
+    history = operations.recent(100)
     assert any(x["event"] == "request.started" for x in history)
     assert any(x["event"] == "request.completed" for x in history)
     starts = [x for x in history if x["event"] == "request.started"]
@@ -118,3 +119,48 @@ def test_log_file_rotation_is_bounded(activity_log, monkeypatch):
     assert activity_log.stat().st_size <= 300
     assert (activity_log.parent / "operations.log.1").exists()
     assert len(list(activity_log.parent.glob("operations.log*"))) <= 3
+
+
+def test_console_relay_shows_events_but_not_speech_text(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(operations, "_FILE", None)
+    operations.configure(tmp_path / "data")
+    secret = "PRIVATE SPOKEN WORDS NEVER TO APPEAR"
+    operations.emit(
+        "generation.started", backend="voxcpm2", model="voxcpm2",
+        characters=len(secret), input=secret, instructions=secret,
+        exception=secret, error_type="RuntimeError",
+    )
+    manager = ManagedTTS(root=tmp_path)
+    with caplog.at_level(logging.INFO, logger="comfyui-tts-api"):
+        manager._relay_events()
+        manager._relay_events()  # Each line is printed once.
+    lines = [record.getMessage() for record in caplog.records
+             if record.name == "comfyui-tts-api"]
+    assert len(lines) == 1
+    assert "[TTS API] generation.started" in lines[0]
+    assert "model=voxcpm2" in lines[0]
+    assert "characters=" in lines[0]
+    assert secret not in lines[0]
+
+
+def test_console_relay_revalidates_tampered_log_entries(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(operations, "_FILE", None)
+    operations.configure(tmp_path / "data")
+    path = tmp_path / "data" / "operations.log"
+    secret = "PRIVATE TTS INPUT"
+    with path.open("a") as handle:
+        handle.write(json.dumps({
+            "event": "request.started", "model": secret,
+            "error_type": secret, "characters": 33, "text": secret,
+            "request_id": "not-a-valid-id",
+        }) + "\n")
+    manager = ManagedTTS(root=tmp_path)
+    with caplog.at_level(logging.INFO, logger="comfyui-tts-api"):
+        manager._relay_events()
+    messages = [x.getMessage() for x in caplog.records
+                if x.name == "comfyui-tts-api"]
+    assert len(messages) == 1
+    assert "request.started" in messages[0]
+    assert "characters=33" in messages[0]
+    assert secret not in messages[0]
+    assert "not-a-valid-id" not in messages[0]
