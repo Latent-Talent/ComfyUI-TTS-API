@@ -35,11 +35,12 @@ bash install.sh
 
 The installer creates `ComfyUI-TTS-API/.venv` and installs the service. This is a **one-time** step; no need to reinstall for ordinary git pulls. It does not change your system Python or the Python environment in `~/ComfyUI/.venv`.
 
-**Restart ComfyUI normally.** Open the **TTS API** icon in ComfyUI's sidebar. You will see three tabs:
+**Restart ComfyUI normally.** Open the **TTS API** icon in ComfyUI's sidebar. You will see four tabs:
 
 - **Server:** online/offline, model VRAM state, allocator backend, idle unload interval, queue state, API key setup, generation performance, API URL, unload model and restart API.
 - **Voices:** list/copy/delete saved voice IDs, create a voice by description, or upload reference audio for cloning.
 - **Test:** type text, choose a saved voice, set delivery instructions/seed/steps, synthesize and play WAV audio.
+- **Activity:** live operational events, request timing, model loads and failures, without logging speech text.
 
 The API process starts automatically when ComfyUI loads the extension. The **GPU model** is only loaded on the first speech/design request.
 
@@ -211,6 +212,22 @@ tail -n 100 ~/ComfyUI/custom_nodes/ComfyUI-TTS-API/data/managed-server.log
 ```
 
 The first speech request downloads model weights; failures involving Torch/CUDA must be diagnosed in the TTS-specific virtual environment. If you previously encountered `cudaMallocAsync does not yet support checkPoolLiveAllocations`, pull this update and restart ComfyUI so it launches a fresh TTS child with the native allocator. To disable automatic process startup, set `TTS_AUTO_START=false` and restart ComfyUI.
+
+## TTS activity logs (without speech text)
+
+Open the **TTS API → Activity** tab to see recent sanitized events refreshed every four seconds while the tab is visible. Events include model load/unload, Qwen model downloads, voice creation, inference start/completion, style-reference cache hits, GPU preemption and errors. Request IDs group related events. Entries include safe status information such as the backend and model ID, number of input characters, audio duration, wall-clock timing and exception **type**.
+
+The event logger has an explicit allowlist of fields. **Speech text, delivery instructions, voice descriptions, reference transcripts, API keys, audio paths and full exception messages are never written to or served from the new operational log.** Unexpected fields are dropped. Operation log files are created with restrictive permissions on Unix.
+
+To watch the same operational events directly in WSL:
+
+```bash
+tail -f ~/ComfyUI/custom_nodes/ComfyUI-TTS-API/data/operations.log
+```
+
+You can also retrieve the sanitized events via the authenticated endpoint `GET /api/operations?limit=100`. The worker keeps `operations.log` capped at approximately 2 MiB with two rotated backups.
+
+**Privacy boundary:** `operations.log` is deliberately separate from `managed-server.log`. The latter contains raw Python, Uvicorn and third-party library output, which this project cannot guarantee is free of user content. Use **Activity** or `operations.log` for privacy-safe operational tracking. These changes do not log speech content from the TTS application itself.
 
 ## Development and validation
 
