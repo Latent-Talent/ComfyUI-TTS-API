@@ -2,14 +2,14 @@
 
 A **sidebar-managed, local text-to-speech API server** for ComfyUI, with an OpenAI-compatible endpoint for SillyTavern and other clients. Supports **VoxCPM2 and Qwen3-TTS** voice design, cloning and named speakers.
 
-**v0.5 — VoxCPM2 + Qwen3-TTS; API + sidebar only. No ComfyUI workflow nodes.** ComfyUI starts the service and manages its GPU memory; voice generation is accessed through the sidebar or HTTP API. This project does not filter, censor, rewrite, or send user text to a moderation service. Model output fidelity is not guaranteed by removing application-side filters.
+**v0.5 — VoxCPM2 + Qwen3-TTS; API + sidebar with an internal queue reservation node.** ComfyUI starts the service and manages its GPU memory; voice generation is accessed through the sidebar or HTTP API. This project does not filter, censor, rewrite, or send user text to a moderation service. Model output fidelity is not guaranteed by removing application-side filters.
 
 ## Highlights
 
 - Dedicated **TTS API** tab in the native ComfyUI sidebar: status, model memory, restart/unload, character voice library, voice design and clone, and a built-in speech test/audio player.
 - A managed local speech API starts automatically when ComfyUI starts, and exits when ComfyUI exits. **No separate `start.sh` needed.**
 - VoxCPM2 and Qwen3-TTS models load lazily, stay resident between requests, and unload after 60 seconds idle (configurable). Switching model families releases the previous model first.
-- When ComfyUI starts an image/video workflow, its prompt handler asks TTS to release VRAM. If the TTS worker cannot yield promptly, ComfyUI terminates its **own managed TTS worker** to free VRAM, interrupting that active TTS request. The service returns after the ComfyUI queue is idle.
+- **One real ComfyUI queue spot per managed speech or voice-design request:** a small internal output node reserves the queue in FIFO order, waits while the separate TTS worker generates audio, and releases the slot after the API response is prepared. Later ComfyUI workflows wait behind active TTS; TTS waits behind earlier ComfyUI workflows. Only a random ticket is stored in ComfyUI's queue, never text or instructions.
 - ComfyUI-specific sidebar API requests are proxied through the ComfyUI HTTP server; browser clients do not need access to the internal API key or a separate TTS URL.
 - The standalone OpenAI-style speech endpoint provides MP3 by default, WAV, Opus/Ogg, AAC, FLAC, and 24 kHz signed 16-bit PCM.
 - Save cloned voices from a reference recording, or design a voice from a natural-language description.
@@ -133,6 +133,22 @@ Some SillyTavern versions instead ask for an API root; use `http://127.0.0.1:802
 
 Delivery conditioning and cloning fidelity are **best effort**: VoxCPM2 does not provide an independent nonverbal style-parameter API. The voice may not always follow an instruction precisely; the final speech call receives only the intended sample/reply text, but acoustic fidelity still depends on the model. The first use of a style is slower than subsequent cached uses, and cached references are lost when the TTS worker restarts.
 
+## ComfyUI queue reservations
+
+When TTS runs under the managed ComfyUI installation, **each speech or voice-design API request creates an actual ComfyUI queue item** named *TTS · Speech* or *TTS · Voice design*. It is queued at the same priority as ordinary workflows, becomes a running queue item when its turn comes, and blocks following image/video workflows until TTS is finished.
+
+The custom node `LatentTalentTTSQueueSlot` is an internal implementation detail, not a user workflow node: it carries only a random UUID ticket. Speech content, voice descriptions, instructions, and API keys never enter ComfyUI's prompt queue or history. The TTS worker stays in its isolated Python/CUDA process.
+
+- New speech requests wait for earlier ComfyUI workflows, and multiple TTS requests get their own queue positions.
+- While a TTS reservation runs, later submitted ComfyUI jobs stay pending; they no longer interrupt an active TTS job merely by being submitted.
+- A canceled pending reservation is discarded. Interrupting a running reservation stops the managed TTS worker before releasing GPU ownership.
+- A crashed worker, lost reservation, or 30-minute watchdog prevents permanent queue blockage. If the queue bridge cannot be reached, managed speech fails explicitly rather than silently bypassing scheduling.
+- **Standalone mode** (`bash start.sh`) remains available without ComfyUI queue coordination.
+
+Verify by opening ComfyUI's Queue panel while making a longer TTS request, or inspect `GET /queue` on the ComfyUI server. The queue entry contains no text, only the internal ticket and an operation title. The ComfyUI terminal also logs reservation start/release events without speech content.
+
+This is an internal queue node that registers with ComfyUI only so the queue can hold a real execution slot. It is not meant to be placed in ordinary user workflows.
+
 ## Voice management API
 
 Clone a voice from a reference file (only with authorization):
@@ -190,8 +206,8 @@ TTS_API_KEY=
 - **ComfyUI owns the process:** the service starts with ComfyUI and shuts down with it.
 - **Allocator compatibility:** ComfyUI may use `cudaMallocAsync`, but some Torch CUDA-graph code called by VoxCPM2 requires `checkPoolLiveAllocations` which `cudaMallocAsync` cannot support. Managed and standalone TTS subprocesses therefore explicitly use `PYTORCH_ALLOC_CONF=backend:native` (and its legacy alias). This does not change the CUDA allocator in the ComfyUI process.
 - **Memory is managed across processes:** the TTS service runs in its own Python/CUDA process. ComfyUI's native model manager does not own its allocations; the extension coordinates unload requests and, if necessary, stops its own service process to free VRAM.
-- **Model stays cached for short gaps:** 60 seconds idle by default. Choose a shorter interval for less VRAM pressure or `0` to disable idle unloading (workflow preemption still applies).
-- **Workflow priority:** TTS may be interrupted while ComfyUI generates images/videos. A simultaneous SillyTavern request may receive a 503 or be interrupted; perfect two-way scheduling is not available yet.
+- **Model stays cached for short gaps:** 60 seconds idle by default. Choose a shorter interval for less VRAM pressure or `0` to disable idle unloading (workflow queue scheduling still applies).
+- **Queue scheduling:** ComfyUI and managed TTS use the same FIFO execution queue, including requests arriving through the separate SillyTavern API. An active TTS job occupies the queue until synthesis and audio encoding finish. If a workflow is already running, TTS waits for its turn rather than consuming GPU memory concurrently. ComfyUI's manual Interrupt or queue cancellation can abort a queued/running TTS reservation; the managed speech worker is terminated when necessary before allowing the next GPU job to run.
 - **LAN:** To accept direct SillyTavern connections from another device, set `TTS_HOST=0.0.0.0` and a strong `TTS_API_KEY` in `.env`. Restart ComfyUI. LAN bind without an API key is refused. Restrict access using a firewall and preferably a VPN. Do not expose the server directly to the public internet.
 - **Independent standalone mode:** `bash start.sh` is available if you intentionally run the speech API *without* ComfyUI. Never start a second copy on the same port.
 
@@ -237,6 +253,6 @@ A small rotating `data/operations.log` file is used internally to forward these 
 .venv/bin/python -m pytest -q
 ```
 
-GitHub CI covers Python syntax, mocked speech API calls, model pause and idle-unload contracts, and browser script syntax. It does **not** run full GPU inference. The sidebar is registered using ComfyUI's supported `registerSidebarTab` extension API with `WEB_DIRECTORY`. The project intentionally declares empty node mappings.
+GitHub CI covers Python syntax, mocked speech API calls, model pause and idle-unload contracts, and browser script syntax. It does **not** run full GPU inference. The sidebar is registered using ComfyUI's supported `registerSidebarTab` extension API with `WEB_DIRECTORY`. The project registers only an internal TTS queue-reservation output node; it does not expose general-purpose workflow TTS nodes.
 
 **Planned:** accelerated inference (vLLM-Omni/Nano-vLLM), audio chunk streaming, and better GPU arbitration with long ComfyUI workloads.
