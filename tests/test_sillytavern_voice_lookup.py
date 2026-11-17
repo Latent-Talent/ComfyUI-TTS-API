@@ -77,4 +77,4 @@ def test_health_version(monkeypatch, tmp_path):
     client, _ = _client(monkeypatch, tmp_path)
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["version"] == "0.5.0"
+    assert response.json()["version"] == "0.6.0"
