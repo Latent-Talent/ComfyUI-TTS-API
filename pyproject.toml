@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-tts-api"
-version = "0.3.0"
-description = "ComfyUI-managed VoxCPM2 speech API with native sidebar and SillyTavern compatibility"
+version = "0.5.0"
+description = "ComfyUI-managed VoxCPM2 and Qwen3-TTS speech API with native sidebar and SillyTavern compatibility"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1",
@@ -11,6 +11,7 @@ dependencies = [
 
 [project.optional-dependencies]
 engine = ["voxcpm"]
+qwen = ["qwen-tts>=0.1.1,<1"]
 test = ["pytest>=8", "httpx>=0.27"]
 
 [tool.pytest.ini_options]
