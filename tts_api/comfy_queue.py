@@ -6,6 +6,7 @@ inputs. Only an opaque random ticket and operation kind cross the boundary.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import json
 import os
 import ssl
@@ -21,6 +22,33 @@ QUEUE_WAIT_SECONDS = 1800
 
 class QueueUnavailable(RuntimeError):
     pass
+
+
+# Set only after the broker confirms our reservation is RUNNING. ContextVars
+# propagate to anyio worker threads, including model load inside _render.
+# The opaque ticket is never logged, returned in HTTP errors, or persisted
+# into the model state.
+_ACTIVE_RESERVATION: ContextVar[tuple[str | None, str] | None] = ContextVar(
+    "tts_comfy_active_reservation", default=None
+)
+
+
+def active_request_kind() -> str | None:
+    reservation = _ACTIVE_RESERVATION.get()
+    return reservation[1] if reservation else None
+
+
+def require_queue_reservation() -> None:
+    """Fail closed before any model weights load in managed ComfyUI mode."""
+    managed = bool(
+        os.getenv("TTS_COMFY_QUEUE_URL") or os.getenv("TTS_CONTROL_TOKEN")
+    )
+    if managed:
+        reservation = _ACTIVE_RESERVATION.get()
+        if reservation is None or not reservation[0]:
+            raise QueueUnavailable(
+                "TTS model loading requires an active ComfyUI queue reservation"
+            )
 
 
 class QueueClient:
@@ -94,18 +122,24 @@ class QueueClient:
 async def queued_tts(kind: str):
     client = QueueClient()
     ticket = await anyio.to_thread.run_sync(client.acquire, kind)
+    # Mark this request as authorized only after successful acquisition.
+    # This context is inherited by the thread doing inference.
+    reservation_token = _ACTIVE_RESERVATION.set((ticket, kind))
     succeeded = False
     try:
         yield
         succeeded = True
     finally:
-        if ticket:
-            try:
-                # Successful API responses get a TTS completion marker.
-                # Failed/cancelled requests remain failed in ComfyUI history.
-                await anyio.to_thread.run_sync(
-                    client.release, ticket,
-                    "completed" if succeeded else "failed",
-                )
-            except QueueUnavailable:
-                pass
+        try:
+            if ticket:
+                try:
+                    # Successful API responses get a TTS completion marker.
+                    # Failed/cancelled requests remain failed in ComfyUI history.
+                    await anyio.to_thread.run_sync(
+                        client.release, ticket,
+                        "completed" if succeeded else "failed",
+                    )
+                except QueueUnavailable:
+                    pass
+        finally:
+            _ACTIVE_RESERVATION.reset(reservation_token)
