@@ -104,3 +104,50 @@
   .tts-ui .tts-defaults-fields { grid-template-columns: 1fr; }
   .tts-ui .tts-default-field.is-wide { grid-column: 1; }
 }
+
+/* Native audio pickers for saved speaker and emotion references. */
+.tts-ui .tts-default-field .tts-audio-saved,
+.tts-ui .tts-default-field .tts-audio-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.tts-ui .tts-default-field .tts-audio-picker,
+.tts-ui .tts-panel > .tts-audio-picker,
+.tts-ui .tts-accordion .tts-audio-picker {
+  border: 1px dashed var(--tts-border);
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--tts-field);
+}
+.tts-ui .tts-audio-picker input[type="file"] {
+  padding: 4px;
+  background: transparent;
+  border: 0;
+  max-width: 100%;
+  font-size: 11px;
+}
+.tts-ui .tts-audio-picker input[type="file"]::file-selector-button {
+  cursor: pointer;
+  color: var(--tts-fg);
+  border: 1px solid var(--tts-border);
+  background: var(--tts-bg);
+  border-radius: 6px;
+  padding: 5px 7px;
+  margin-right: 8px;
+}
+.tts-ui .tts-default-field .tts-audio-consent {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+.tts-ui .tts-audio-consent input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
+}
+.tts-ui .tts-default-field[data-default-row="emotion_vector"] {
+  grid-column: 1 / -1;
+}
