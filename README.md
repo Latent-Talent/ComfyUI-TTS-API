@@ -1,14 +1,14 @@
 # ComfyUI TTS API
 
-A **sidebar-managed, local text-to-speech API server** for ComfyUI, with an OpenAI-compatible endpoint for SillyTavern and other clients. Supports **VoxCPM2 and Qwen3-TTS** voice design, cloning and named speakers.
+A **sidebar-managed, local text-to-speech API server** for ComfyUI, with an OpenAI-compatible endpoint for SillyTavern and other clients. Supports **VoxCPM2, Qwen3-TTS, and IndexTTS 2.5** voice cloning, model-specific voice design, and emotion controls.
 
-**v0.5 — VoxCPM2 + Qwen3-TTS; API + sidebar with an internal queue reservation node.** ComfyUI starts the service and manages its GPU memory; voice generation is accessed through the sidebar or HTTP API. This project does not filter, censor, rewrite, or send user text to a moderation service. Model output fidelity is not guaranteed by removing application-side filters.
+**v0.6 — VoxCPM2 + Qwen3-TTS + IndexTTS 2.5; API + sidebar with an internal queue reservation node.** ComfyUI starts the service and manages its GPU memory; voice generation is accessed through the sidebar or HTTP API. This project does not filter, censor, rewrite, or send user text to a moderation service. Model output fidelity is not guaranteed by removing application-side filters.
 
 ## Highlights
 
 - Dedicated **TTS API** tab in the native ComfyUI sidebar: status, model memory, restart/unload, character voice library, voice design and clone, and a built-in speech test/audio player.
 - A managed local speech API starts automatically when ComfyUI starts, and exits when ComfyUI exits. **No separate `start.sh` needed.**
-- VoxCPM2 and Qwen3-TTS models load lazily, stay resident between requests, and unload after 60 seconds idle (configurable). Switching model families releases the previous model first.
+- VoxCPM2, Qwen3-TTS, and IndexTTS models load lazily, stay resident between requests, and unload after 60 seconds idle (configurable). Switching model families releases the previous model first.
 - **One real ComfyUI queue spot per managed speech or voice-design request:** a small internal output node reserves the queue in FIFO order, waits while the separate TTS worker generates audio, and releases the slot after the API response is prepared. Later ComfyUI workflows wait behind active TTS; TTS waits behind earlier ComfyUI workflows. Only a random ticket is stored in ComfyUI's queue, never text or instructions.
 - ComfyUI-specific sidebar API requests are proxied through the ComfyUI HTTP server; browser clients do not need access to the internal API key or a separate TTS URL.
 - The standalone OpenAI-style speech endpoint provides MP3 by default, WAV, Opus/Ogg, AAC, FLAC, and 24 kHz signed 16-bit PCM.
@@ -60,7 +60,7 @@ This does **not** alter your system Python or ComfyUI's `~/ComfyUI/.venv`. It in
 Restart ComfyUI once after updating the custom node, and use the **TTS API → Server → Speech model** controls:
 
 1. Select a supported Qwen model.
-2. Optionally click **Download Qwen weights** to cache weights in the normal Hugging Face cache (no GPU load). The sidebar shows download state; the worker log contains detailed transfer progress. Alternatively, the first generation auto-downloads missing model weights.
+2. Optionally click **Download Qwen weights** to cache weights under `ComfyUI/models/TTS` (no GPU load). The sidebar shows download state; the worker log contains detailed transfer progress. Alternatively, the first generation auto-downloads missing model weights.
 3. Click **Make API default** if you want SillyTavern's `tts-1` requests to use that model. This saves `TTS_ACTIVE_MODEL` in `.env` and restarts **only the TTS service**, preserving ComfyUI and the API key.
 4. Under **Test**, select the backend and use a speaker or saved voice. The selected backend can be tested without changing the global default.
 
@@ -78,9 +78,67 @@ Supported Qwen checkpoints:
 
 **Saved voices work across engines:** Voice Design with Qwen uses its dedicated VoiceDesign model and stores the generated sample as an ordinary persistent `voice_...` recording. When you use that saved voice with Qwen CustomVoice, the server automatically switches to the matching **Base** model for cloning (with a 0.6B Base when a 0.6B model was selected). If the active model is Base and no saved voice is chosen, the API returns an explicit 422 instead of inventing a reference.
 
-Qwen model weights are saved in the default Hugging Face cache, normally `~/.cache/huggingface/hub`. The TTS server keeps at most one active inference model in GPU memory. Downloading a Qwen checkpoint does not preload it in VRAM; selecting a different checkpoint releases the old one before loading the replacement.
+New Qwen and VoxCPM model downloads are stored in `ComfyUI/models/TTS/huggingface/hub`, not in your system-wide Hugging Face cache. The TTS server keeps at most one active inference model in GPU memory. Downloading a Qwen checkpoint does not preload it in VRAM; selecting a different checkpoint releases the old one before loading the replacement.
 
 **Current limitation:** The Qwen3-TTS Python backend generates full audio before responding. A cold model switch or first-time model download will add latency. Native Qwen voice design and instruction control are distinct from the VoxCPM2 two-pass approximation.
+
+### IndexTTS 2.5 (optional)
+
+IndexTTS 2.5 requires **Python 3.11**, whereas the existing TTS API uses Python 3.12. To avoid modifying ComfyUI's Python, Torch, or CUDA installation, its official source and packages run in a separate `uv`-managed environment. Its checkpoint weights are stored alongside the other TTS models.
+
+```bash
+cd ~/ComfyUI/custom_nodes/ComfyUI-TTS-API
+git pull --ff-only
+bash install-index.sh
+```
+
+Prerequisite: [uv](https://docs.astral.sh/uv/getting-started/installation/) must be available in your shell. The installer uses `uv python install 3.11`, which installs a managed interpreter without replacing your system Python. Installing IndexTTS is optional and does not reinstall VoxCPM2 or Qwen3-TTS.
+
+Restart ComfyUI, then open **TTS API → Server**, select **IndexTTS · 2.5**, and click **Download IndexTTS 2.5 weights**. Downloaded weights go to `ComfyUI/models/TTS/IndexTTS-2.5/checkpoints`. The engine's auxiliary models also cache beneath that checkpoint directory. The lightweight HTTP API stays in its existing Python 3.12 environment; IndexTTS runs in its own subprocess and uses the same ComfyUI queue reservation.
+
+**Voice cloning:** IndexTTS requires a saved voice recording. Upload a reference in **Voices → Clone**, select IndexTTS in **Test**, and select that voice. Unlike Qwen's VoiceDesign checkpoint, IndexTTS does not invent a speaker identity from a written voice description alone.
+
+**Emotion control:** The IndexTTS panel supports Neutral, automatic text emotion analysis, instructions-as-emotion-description, eight manual values `[happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]`, and emotion-reference audio from another saved voice. `emotion_strength` ranges from 0 to 1; `duration_factor` ranges from 0.5 to 2.0. IndexTTS 2.5 supports English, Chinese, Japanese, Spanish and Arabic. With `language=Auto` the integration defaults to English; specify the language for other languages.
+
+Example API request using a saved voice ID:
+
+```json
+{
+  "model": "indextts-2.5",
+  "voice": "voice_YOUR_SAVED_VOICE_ID",
+  "input": "I cannot believe you did that!",
+  "response_format": "wav",
+  "language": "English",
+  "emotion_mode": "vector",
+  "emotion_vector": [0, 0.8, 0, 0, 0, 0, 0.2, 0],
+  "emotion_strength": 0.75,
+  "duration_factor": 1.0
+}
+```
+
+Alternative emotion modes are `auto`, `text` (uses the `instructions` field) and `reference` (uses `emotion_reference_voice` with a saved voice ID). When you pass `instructions` to IndexTTS without specifying an emotion mode, the API interprets them as an emotion description.
+
+**Operational logs do not include the text.** The upstream IndexTTS code can print speech or transcription text; its raw diagnostics are kept separate in `data/index-worker.log`, and only sanitized operation metadata is forwarded to the ComfyUI console. The raw log is not guaranteed to be free of content.
+
+### Moving previously downloaded TTS models (manual only)
+
+**The application does not search, copy, migrate, or delete old downloaded models.** Only new downloads are directed to the new model location. If you already downloaded VoxCPM2 or Qwen3-TTS into the legacy Hugging Face cache, stop ComfyUI and run the optional one-time script:
+
+```bash
+cd ~/ComfyUI/custom_nodes/ComfyUI-TTS-API
+bash move-tts-models.sh --dry-run
+bash move-tts-models.sh
+```
+
+The move script relocates only recognized TTS model cache directories into `~/ComfyUI/models/TTS/huggingface/hub` and preserves Hugging Face snapshot symlinks. It skips already-existing targets and unrelated model caches. **It moves rather than copies**, so another application using the old shared cache location may need to download those same weights again.
+
+An existing separate IndexTTS checkpoint directory can also be moved explicitly:
+
+```bash
+bash move-tts-models.sh --index-source /path/to/old/indextts/checkpoints
+```
+
+To store newly downloaded TTS models somewhere else, set `TTS_MODELS_DIR=/absolute/path` in the custom node's `.env` (the `move-tts-models.sh` script uses the shell environment rather than sourcing `.env`). This never changes ComfyUI's own model paths, system Python, or user-wide HF cache settings.
 
 ### API key setup from the sidebar
 
