@@ -29,7 +29,7 @@ EVENTS = frozenset({
     "service.started", "service.stopped",
     "request.started", "request.completed", "request.failed",
     "voice.design.started", "voice.design.completed", "voice.design.failed",
-    "voice.clone.saved", "voice.deleted",
+    "voice.clone.saved", "voice.updated", "voice.deleted",
     "model.load.started", "model.load.completed", "model.load.failed",
     "model.unloaded", "model.switch", "model.idle_unloaded",
     "generation.started", "generation.completed", "generation.failed",
@@ -42,7 +42,7 @@ EVENTS = frozenset({
 # Only these keys may cross the log boundary. No arbitrary values or keys.
 INT_FIELDS = {"characters", "audio_bytes", "sample_rate", "steps"}
 FLOAT_FIELDS = {"elapsed_ms", "audio_seconds", "rtf"}
-BOOL_FIELDS = {"cached", "has_reference", "has_instructions"}
+BOOL_FIELDS = {"cached", "has_reference", "has_instructions", "audio_replaced"}
 STRING_FIELDS = {
     "model": r"^[a-zA-Z0-9_.-]{1,80}$",
     "backend": r"^(voxcpm2|qwen3-tts|indextts)$",
