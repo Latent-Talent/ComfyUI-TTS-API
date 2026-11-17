@@ -375,7 +375,7 @@ class ManagedTTS:
             with path.open("rb") as handle:
                 handle.seek(self._event_offset)
                 chunk = handle.read(65536)
-            last_line = chunk.rfind(b"\\n")
+            last_line = chunk.rfind(b"\n")
             if last_line < 0:
                 return
             self._event_offset += last_line + 1
