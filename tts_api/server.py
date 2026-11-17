@@ -219,6 +219,8 @@ def _render(request: SpeechRequest) -> bytes:
     with INFERENCE_LOCK:
         if is_qwen(model_id):
             if ENGINE.loaded:
+                emit("model.switch", backend="qwen3-tts",
+                     model=model_id, reason="switch")
                 ENGINE.unload()
             actual_model = model_id
             if voice is not None:
@@ -236,6 +238,8 @@ def _render(request: SpeechRequest) -> bytes:
                  elapsed_ms=QWEN_ENGINE.last_stats.get("seconds", 0.0) * 1000)
             return result
         if QWEN_ENGINE.loaded:
+            emit("model.switch", backend="voxcpm2",
+                 model=VOX_ID, reason="switch")
             QWEN_ENGINE.unload()
         result = ENGINE.generate_with_delivery(
             request.input, instructions=request.instructions,
@@ -510,6 +514,9 @@ async def clone_voice(name: str = Form(...), reference_text: str = Form(""),
 
 def _design_voice(request: DesignRequest):
     selected = canonical_model(request.model, ACTIVE_MODEL, MODEL)
+    emit("voice.design.started", model=QWEN_DESIGN if is_qwen(selected) else VOX_ID,
+         backend="qwen3-tts" if is_qwen(selected) else "voxcpm2",
+         characters=len(request.sample_text), has_instructions=True)
     with INFERENCE_LOCK:
         if is_qwen(selected):
             # VoiceDesign is a dedicated checkpoint. The resulting reference
