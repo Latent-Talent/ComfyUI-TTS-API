@@ -92,7 +92,13 @@ function template() {
       </div>
       <div class="tts-panel" data-panel="voices" hidden>
         <div class="tts-section-title">Saved character voices</div>
-        <div class="tts-actions"><button type="button" data-action="refresh-voices">Refresh voices</button></div>
+        <label>Search voices
+          <input data-voice-search type="search" placeholder="Search name, description or voice ID" autocomplete="off">
+        </label>
+        <div class="tts-voice-toolbar">
+          <span class="tts-muted" data-voice-count role="status" aria-live="polite">Loading voices…</span>
+          <button type="button" data-action="refresh-voices">Refresh</button>
+        </div>
         <div class="tts-voices" data-voices><p class="tts-muted">Loading…</p></div>
         <details class="tts-accordion">
           <summary>Design voice from description</summary>
@@ -202,6 +208,7 @@ function mount(container) {
     let modelChoicesInitialized = false;
     let defaultsByModel = {};
     let savedVoices = [];
+    const voicePreviewUrls = new Map();
     let renderedDefaultsModel = null;
     const pendingAudio = new Map();
     let downloadStatus = null;
@@ -720,72 +727,295 @@ function mount(container) {
             : "No speech generated yet.";
     }
 
-    async function refreshVoices() {
-        const voices = await (await request("/voices")).json();
-        if (destroyed) return;
-        savedVoices = voices;
-        refreshDefaultVoiceOptions();
-        const list = $("[data-voices]");
-        list.replaceChildren();
-        const select = $("[data-test-voice]");
-        const choice = select.value;
-        const emotionSelect = $("[data-index-emo-reference]");
-        const previousEmotionRef = emotionSelect.value;
-        emotionSelect.replaceChildren(new Option("Select saved voice", "default"));
-        select.replaceChildren(new Option("Default voice", "default"));
-        const chosenModel = $("[data-test-model]").value;
-        if (chosenModel.startsWith("qwen3-tts") && chosenModel.endsWith("customvoice")) {
-            for (const speaker of qwenSpeakers) {
-                select.add(new Option("Qwen · " + speaker, speaker));
+    function cleanupVoicePreviews() {
+        for (const url of voicePreviewUrls.values()) URL.revokeObjectURL(url);
+        voicePreviewUrls.clear();
+    }
+
+    function voiceUsage(voiceId) {
+        const usages = [];
+        for (const [modelId, profile] of Object.entries(defaultsByModel)) {
+            for (const field of ["voice", "emotion_reference_voice"]) {
+                if (profile?.values?.[field] === voiceId) {
+                    usages.push(modelId + (field === "voice" ? " (default)" : " (emotion)"));
+                }
             }
         }
-        if (!voices.length) {
+        return usages;
+    }
+
+    function showVoices() {
+        const list = $("[data-voices]");
+        list.replaceChildren();
+        cleanupVoicePreviews();
+        const search = $("[data-voice-search]").value.trim().toLocaleLowerCase();
+        const sorted = [...savedVoices].sort((left, right) =>
+            (left.name || "").localeCompare(right.name || "", undefined,
+                {sensitivity: "base", numeric: true})
+        );
+        const matches = sorted.filter((voice) =>
+            [voice.name, voice.id, voice.description, voice.reference_text]
+                .some((value) => String(value || "").toLocaleLowerCase().includes(search)));
+        $("[data-voice-count]").textContent = search
+            ? matches.length + " of " + sorted.length + " saved voices"
+            : sorted.length + " saved " + (sorted.length === 1 ? "voice" : "voices");
+        if (!matches.length) {
             const empty = document.createElement("p");
             empty.className = "tts-muted";
-            empty.textContent = "No saved voices. Design or clone one below.";
+            empty.textContent = sorted.length
+                ? "No voices match your search."
+                : "No saved voices. Clone a recording or design a voice below.";
             list.append(empty);
         }
-        for (const voice of voices) {
-            const item = document.createElement("div");
-            item.className = "tts-voice";
+
+        for (const voice of matches) {
+            const card = document.createElement("article");
+            card.className = "tts-voice";
             const details = document.createElement("div");
             details.className = "tts-voice-details";
             const title = document.createElement("strong");
             title.textContent = voice.name || voice.id;
             const code = document.createElement("code");
             code.textContent = voice.id;
-            code.title = voice.description || voice.id;
             details.append(title, code);
-            const tools = document.createElement("div");
-            tools.className = "tts-voice-actions";
-            const copy = document.createElement("button");
-            copy.type = "button";
-            copy.textContent = "Copy ID";
-            copy.addEventListener("click", () => navigator.clipboard.writeText(voice.id)
-                .then(() => feedback("Copied voice ID."))
-                .catch(() => feedback("Could not copy voice ID.", true)));
-            const remove = document.createElement("button");
-            remove.type = "button";
-            remove.textContent = "Delete";
-            remove.addEventListener("click", async () => {
-                if (!window.confirm(`Delete saved voice "${voice.name}"?`)) return;
+            if (voice.description) {
+                const description = document.createElement("span");
+                description.className = "tts-voice-description";
+                description.textContent = voice.description;
+                details.append(description);
+            }
+            const usage = voiceUsage(voice.id);
+            if (usage.length) {
+                const inUse = document.createElement("small");
+                inUse.className = "tts-muted";
+                inUse.textContent = "Used by " + usage.join(", ");
+                details.append(inUse);
+            }
+            const actions = document.createElement("div");
+            actions.className = "tts-voice-actions";
+            const editor = document.createElement("div");
+            editor.className = "tts-voice-editor";
+            editor.hidden = true;
+
+            const editButton = document.createElement("button");
+            editButton.type = "button";
+            editButton.textContent = "View / Edit";
+            editButton.setAttribute("aria-expanded", "false");
+            const editorId = "tts-voice-" + voice.id;
+            editor.id = editorId;
+            editButton.setAttribute("aria-controls", editorId);
+            editButton.addEventListener("click", () => {
+                editor.hidden = !editor.hidden;
+                editButton.setAttribute("aria-expanded", String(!editor.hidden));
+                editButton.textContent = editor.hidden ? "View / Edit" : "Close details";
+            });
+
+            const testButton = document.createElement("button");
+            testButton.type = "button";
+            testButton.textContent = "Use in Test";
+            testButton.addEventListener("click", () => {
+                if (!voice.reference_file) {
+                    feedback("This voice has no saved recording to use as a speech reference.", true);
+                    return;
+                }
+                $("[data-test-voice]").value = voice.id;
+                activeTab("test");
+            });
+
+            const copyButton = document.createElement("button");
+            copyButton.type = "button";
+            copyButton.textContent = "Copy ID";
+            copyButton.addEventListener("click", async () => {
                 try {
-                    await request("/voices/" + encodeURIComponent(voice.id), { method: "DELETE" });
+                    await navigator.clipboard.writeText(voice.id);
+                    feedback("Voice ID copied.");
+                } catch (_) {
+                    feedback("Could not copy voice ID.", true);
+                }
+            });
+
+            const removeButton = document.createElement("button");
+            removeButton.type = "button";
+            removeButton.textContent = "Delete";
+            removeButton.className = "tts-destructive";
+            removeButton.addEventListener("click", async () => {
+                const warning = usage.length
+                    ? "\n\nThis voice is referenced in model defaults: " +
+                      usage.join(", ") + ". You may need to select another voice."
+                    : "";
+                if (!window.confirm("Delete saved voice \"" + voice.name +
+                    "\" and its reference recording? This cannot be undone." + warning)) return;
+                removeButton.disabled = true;
+                try {
+                    await request("/voices/" + encodeURIComponent(voice.id),
+                                  {method: "DELETE"});
                     await refreshVoices();
                     feedback("Voice deleted.");
-                } catch (e) { feedback(e.message, true); }
+                } catch (error) {
+                    removeButton.disabled = false;
+                    feedback(error.message, true);
+                }
             });
-            tools.append(copy, remove);
-            item.append(details, tools);
-            list.append(item);
+            actions.append(editButton, testButton, copyButton, removeButton);
+
+            const addField = (text, value, type = "input", limit = 1000) => {
+                const label = document.createElement("label");
+                label.textContent = text;
+                const input = document.createElement(type === "textarea" ? "textarea" : "input");
+                if (type === "textarea") input.rows = 2;
+                else input.type = "text";
+                input.maxLength = limit;
+                input.value = value || "";
+                label.append(input);
+                editor.append(label);
+                return input;
+            };
+            const name = addField("Voice name", voice.name, "input", 120);
+            const description = addField("Description", voice.description, "textarea", 1000);
+            const referenceText = addField("Reference transcript", voice.reference_text, "textarea", 4000);
+
+            if (voice.reference_file) {
+                const listenButton = document.createElement("button");
+                listenButton.type = "button";
+                listenButton.textContent = "Preview reference recording";
+                const player = document.createElement("audio");
+                player.controls = true;
+                player.preload = "none";
+                player.hidden = true;
+                listenButton.addEventListener("click", async () => {
+                    if (!player.hidden) {
+                        player.pause();
+                        player.hidden = true;
+                        listenButton.textContent = "Preview reference recording";
+                        return;
+                    }
+                    if (!player.src) {
+                        listenButton.disabled = true;
+                        listenButton.textContent = "Loading recording…";
+                        try {
+                            const response = await request("/voices/" +
+                                encodeURIComponent(voice.id) + "/audio");
+                            const blob = await response.blob();
+                            if (destroyed || !card.isConnected) return;
+                            const url = URL.createObjectURL(blob);
+                            voicePreviewUrls.set(voice.id, url);
+                            player.src = url;
+                        } catch (error) {
+                            feedback(error.message, true);
+                            return;
+                        } finally {
+                            listenButton.disabled = false;
+                        }
+                    }
+                    player.hidden = false;
+                    listenButton.textContent = "Hide reference recording";
+                });
+                editor.append(listenButton, player);
+            } else {
+                const note = document.createElement("p");
+                note.className = "tts-muted";
+                note.textContent = "No recording is attached. Add one below to enable cloning.";
+                editor.append(note);
+            }
+
+            const fileLabel = document.createElement("label");
+            fileLabel.className = "tts-audio-picker";
+            fileLabel.textContent = voice.reference_file
+                ? "Replace reference recording (optional)"
+                : "Add reference recording (optional)";
+            const fileInput = document.createElement("input");
+            fileInput.type = "file";
+            fileInput.accept = "audio/*,.wav,.flac,.ogg,.mp3,.aiff";
+            fileLabel.append(fileInput);
+            editor.append(fileLabel);
+            const permissionLabel = document.createElement("label");
+            permissionLabel.className = "tts-check";
+            permissionLabel.hidden = true;
+            const consent = document.createElement("input");
+            consent.type = "checkbox";
+            permissionLabel.append(consent, document.createTextNode(
+                " I have permission to use the replacement recording."));
+            editor.append(permissionLabel);
+            fileInput.addEventListener("change", () => {
+                permissionLabel.hidden = !fileInput.files?.length;
+                consent.checked = false;
+            });
+            const saveButton = document.createElement("button");
+            saveButton.type = "button";
+            saveButton.className = "tts-primary";
+            saveButton.textContent = "Save voice changes";
+            saveButton.addEventListener("click", async () => {
+                const newName = name.value.trim();
+                if (!newName) return feedback("Enter a voice name.", true);
+                const file = fileInput.files?.[0];
+                if (file && !consent.checked) {
+                    return feedback("Confirm permission to use the new recording.", true);
+                }
+                if (file && file.size > 20 * 1024 * 1024) {
+                    return feedback("Recording exceeds the 20 MB limit.", true);
+                }
+                const body = new FormData();
+                body.append("name", newName);
+                body.append("description", description.value);
+                body.append("reference_text", referenceText.value);
+                body.append("consent", String(Boolean(file && consent.checked)));
+                if (file) body.append("audio", file);
+                saveButton.disabled = true;
+                saveButton.textContent = "Saving…";
+                try {
+                    const updated = await (await request(
+                        "/voices/" + encodeURIComponent(voice.id),
+                        {method: "PATCH", body}
+                    )).json();
+                    await refreshVoices();
+                    feedback("Voice saved. ID unchanged: " + updated.id);
+                } catch (error) {
+                    saveButton.disabled = false;
+                    saveButton.textContent = "Save voice changes";
+                    feedback(error.message, true);
+                }
+            });
+            editor.append(saveButton);
+            card.append(details, actions, editor);
+            list.append(card);
+        }
+    }
+
+    async function refreshVoices() {
+        const voices = await (await request("/voices")).json();
+        if (destroyed) return;
+        savedVoices = voices;
+        refreshDefaultVoiceOptions();
+        const select = $("[data-test-voice]");
+        const previous = select.value;
+        const emotionSelect = $("[data-index-emo-reference]");
+        const previousEmotion = emotionSelect.value;
+        emotionSelect.replaceChildren(new Option("Select saved voice", "default"));
+        select.replaceChildren(new Option("Default voice", "default"));
+        const model = $("[data-test-model]").value;
+        if (model.startsWith("qwen3-tts") && model.endsWith("customvoice")) {
+            for (const speaker of qwenSpeakers) {
+                select.add(new Option("Qwen · " + speaker, speaker));
+            }
+        }
+        for (const voice of [...voices].sort((a, b) =>
+            (a.name || "").localeCompare(b.name || "", undefined, {sensitivity: "base"}))) {
             select.add(new Option(voice.name || voice.id, voice.id));
-            emotionSelect.add(new Option(voice.name || voice.id, voice.id));
+            if (voice.reference_file) {
+                emotionSelect.add(new Option(voice.name || voice.id, voice.id));
+            }
         }
-        if ([...select.options].some((option) => option.value === choice)) select.value = choice;
-        if ([...emotionSelect.options].some((option) => option.value === previousEmotionRef)) emotionSelect.value = previousEmotionRef;
-        if ((chosenModel.endsWith("-base") || chosenModel === "indextts-2.5") && select.value === "default" && voices.length) {
-            select.value = voices[0].id;
+        if ([...select.options].some((option) => option.value === previous)) {
+            select.value = previous;
         }
+        if ([...emotionSelect.options].some((option) => option.value === previousEmotion)) {
+            emotionSelect.value = previousEmotion;
+        }
+        if ((model.endsWith("-base") || model === "indextts-2.5") &&
+            select.value === "default" && voices.some((v) => v.reference_file)) {
+            select.value = voices.find((v) => v.reference_file).id;
+        }
+        showVoices();
     }
 
     async function perform(button, operation, success) {
@@ -811,6 +1041,7 @@ function mount(container) {
         refreshStatus().catch((e) => feedback(e.message, true)));
     $("[data-action=refresh-voices]").addEventListener("click", () =>
         refreshVoices().catch((e) => feedback(e.message, true)));
+    $("[data-voice-search]").addEventListener("input", showVoices);
     $("[data-action=copy-url]").addEventListener("click", async () => {
         try {
             await navigator.clipboard.writeText($("[data-endpoint]").textContent);
@@ -1038,6 +1269,7 @@ function mount(container) {
             });
             const blob = await response.blob();
             if (audioURL) URL.revokeObjectURL(audioURL);
+            cleanupVoicePreviews();
             audioURL = URL.createObjectURL(blob);
             const player = $("[data-audio]");
             player.src = audioURL;
