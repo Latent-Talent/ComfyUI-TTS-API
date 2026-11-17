@@ -45,7 +45,7 @@ FLOAT_FIELDS = {"elapsed_ms", "audio_seconds", "rtf"}
 BOOL_FIELDS = {"cached", "has_reference", "has_instructions"}
 STRING_FIELDS = {
     "model": r"^[a-zA-Z0-9_.-]{1,80}$",
-    "backend": r"^(voxcpm2|qwen3-tts)$",
+    "backend": r"^(voxcpm2|qwen3-tts|indextts)$",
     "voice_type": r"^(default|preset|saved|openai_alias)$",
     "status": r"^(ok|error|paused|idle|starting|running)$",
     "error_type": r"^[a-zA-Z][a-zA-Z0-9_]{0,90}$",
