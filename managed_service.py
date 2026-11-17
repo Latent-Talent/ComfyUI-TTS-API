@@ -80,6 +80,8 @@ class ManagedTTS:
         self._hold_until = 0.0
         self._installed = False
         self._owns_child = False
+        self._parent_write_fd = None
+        self._blocked_start_logged = False
         self._disabled = self.config.get("TTS_AUTO_START", "true").lower() in ("0", "false", "no")
         self._skip_warning = False
 
@@ -247,6 +249,32 @@ class ManagedTTS:
         except OSError:
             return False
 
+    def _acquire_worker_lock(self, data_dir: Path) -> int | None:
+        """Hold a single managed worker across ComfyUI Manager exec restarts.
+
+        Python's flock is inherited by the spawned child via pass_fds, not
+        retained by ComfyUI. A new ComfyUI process cannot spawn another managed
+        TTS worker until the old one has actually exited.
+        """
+        if os.name != "posix":
+            return None
+        import fcntl
+        fd = os.open(data_dir / ".managed-worker.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def _log_blocked_start(self, message: str):
+        if not self._blocked_start_logged:
+            LOG.info("[TTS API] %s; waiting for previous worker to exit", message)
+            self._blocked_start_logged = True
+
     def _spawn(self):
         if self._disabled or self._running() or self._stop.is_set():
             return False
@@ -262,67 +290,85 @@ class ManagedTTS:
         if self.host not in ("127.0.0.1", "localhost", "::1") and not self.config.get("TTS_API_KEY"):
             LOG.error("[TTS API] Refusing a non-loopback binding without TTS_API_KEY")
             return False
-        if self._port_open():
-            # Never seize or terminate a port belonging to another process.
-            LOG.warning("[TTS API] Port %s already occupied; managed service not started", self.port)
-            return False
         data_dir = self.root / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
-        self._log_handle = (data_dir / "managed-server.log").open("ab", buffering=0)
-        environment = os.environ.copy()
-        environment.update(self.config)
-        # Model cache location belongs to the child only. Keep ComfyUI's
-        # global Hugging Face and Python environments exactly as they were.
-        selected_models = Path(
-            self.config.get("TTS_MODELS_DIR", str(self.root.parent.parent / "models" / "TTS"))
-        ).expanduser()
-        if not selected_models.is_absolute():
-            selected_models = self.root / selected_models
-        selected_models = selected_models.resolve()
-        environment["TTS_MODELS_DIR"] = str(selected_models)
-        environment["HF_HOME"] = str(selected_models / "huggingface")
-        environment["HF_HUB_CACHE"] = str(selected_models / "huggingface" / "hub")
-        environment["MODELSCOPE_CACHE"] = str(selected_models / "modelscope")
-        # ComfyUI may use cudaMallocAsync in its own process. VoxCPM2's
-        # compiled CUDA graph path calls checkPoolLiveAllocations, which that
-        # allocator cannot implement. Pin ONLY the child to native before
-        # importing torch; do not touch ComfyUI's allocator configuration.
-        environment["PYTORCH_ALLOC_CONF"] = "backend:native"
-        environment["PYTORCH_CUDA_ALLOC_CONF"] = "backend:native"
-        environment["TTS_CONTROL_TOKEN"] = self.control_token
-        environment["TTS_PARENT_PID"] = str(os.getpid())
-        # The worker uses a private loopback control bridge to reserve a real
-        # ComfyUI queue position before loading TTS weights or generating.
+        lock_fd = self._acquire_worker_lock(data_dir)
+        if os.name == "posix" and lock_fd is None:
+            # Another ComfyUI instance or an old Manager exec child still
+            # owns the worker. Do not create another process or steal it.
+            self._log_blocked_start("A managed TTS worker already exists")
+            return False
+        parent_read = None
+        parent_write = None
         try:
-            from comfy.cli_args import args as comfy_args
-            scheme = "https" if getattr(comfy_args, "tls_certfile", None) else "http"
-            port = int(getattr(comfy_args, "port", 8188))
-        except (ImportError, AttributeError, ValueError, TypeError):
-            scheme, port = "http", 8188
-        environment["TTS_COMFY_QUEUE_URL"] = f"{scheme}://127.0.0.1:{port}/tts-api/queue"
-        environment["TTS_DATA_DIR"] = str(data_dir) if "TTS_DATA_DIR" not in self.config else self.config["TTS_DATA_DIR"]
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
-        kwargs = {"cwd": str(self.root), "env": environment,
-                  "stdin": subprocess.DEVNULL, "stdout": self._log_handle,
-                  "stderr": subprocess.STDOUT, "creationflags": creationflags}
-        if os.name == "posix":
-            # No Python preexec_fn: forking with ComfyUI's many active threads
-            # could otherwise deadlock. The service monitors TTS_PARENT_PID.
-            kwargs["start_new_session"] = True
-        try:
+            if self._port_open():
+                # This includes external standalone TTS services. Do not
+                # claim ownership of another process or kill its GPU state.
+                self._log_blocked_start(f"TTS port {self.port} is already occupied")
+                return False
+            if os.name == "posix":
+                # The write FD lives only in the *current* ComfyUI interpreter.
+                # It is non-inheritable (CLOEXEC), therefore os.execv closes
+                # it even if the PID stays unchanged. The child immediately
+                # sees EOF on its inherited read FD and exits.
+                parent_read, parent_write = os.pipe()
+            self._log_handle = (data_dir / "managed-server.log").open("ab", buffering=0)
+            environment = os.environ.copy()
+            environment.update(self.config)
+            selected_models = Path(
+                self.config.get("TTS_MODELS_DIR", str(self.root.parent.parent / "models" / "TTS"))
+            ).expanduser()
+            if not selected_models.is_absolute():
+                selected_models = self.root / selected_models
+            selected_models = selected_models.resolve()
+            environment["TTS_MODELS_DIR"] = str(selected_models)
+            environment["HF_HOME"] = str(selected_models / "huggingface")
+            environment["HF_HUB_CACHE"] = str(selected_models / "huggingface" / "hub")
+            environment["MODELSCOPE_CACHE"] = str(selected_models / "modelscope")
+            environment["PYTORCH_ALLOC_CONF"] = "backend:native"
+            environment["PYTORCH_CUDA_ALLOC_CONF"] = "backend:native"
+            environment["TTS_CONTROL_TOKEN"] = self.control_token
+            environment["TTS_PARENT_PID"] = str(os.getpid())
+            if parent_read is not None:
+                environment["TTS_PARENT_PIPE_FD"] = str(parent_read)
+            try:
+                from comfy.cli_args import args as comfy_args
+                scheme = "https" if getattr(comfy_args, "tls_certfile", None) else "http"
+                port = int(getattr(comfy_args, "port", 8188))
+            except (ImportError, AttributeError, ValueError, TypeError):
+                scheme, port = "http", 8188
+            environment["TTS_COMFY_QUEUE_URL"] = f"{scheme}://127.0.0.1:{port}/tts-api/queue"
+            environment["TTS_DATA_DIR"] = str(data_dir) if "TTS_DATA_DIR" not in self.config else self.config["TTS_DATA_DIR"]
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+            kwargs = {"cwd": str(self.root), "env": environment,
+                      "stdin": subprocess.DEVNULL, "stdout": self._log_handle,
+                      "stderr": subprocess.STDOUT, "creationflags": creationflags}
+            if os.name == "posix":
+                kwargs["start_new_session"] = True
+                kwargs["pass_fds"] = (lock_fd, parent_read)
             self._process = subprocess.Popen(
-                [str(executable), "-m", "uvicorn", "tts_api.server:app",
-                 "--host", self.host, "--port", str(self.port), "--workers", "1"],
+                [str(executable), "-m", "tts_api.managed_entry",
+                 "--host", self.host, "--port", str(self.port)],
                 **kwargs,
             )
+            self._parent_write_fd = parent_write
+            parent_write = None
             self._owns_child = True
-            LOG.info("[TTS API] Managed speech server started (PID %s), %s", self._process.pid, self.url)
+            self._blocked_start_logged = False
+            LOG.info("[TTS API] Launched managed speech worker (PID %s), %s",
+                     self._process.pid, self.url)
             return True
         except (OSError, ValueError) as exc:
-            LOG.error("[TTS API] Unable to start speech server: %s", exc)
+            LOG.error("[TTS API] Unable to launch speech worker: %s", exc)
             self._process = None
             return False
         finally:
+            if parent_read is not None:
+                os.close(parent_read)
+            if parent_write is not None:
+                os.close(parent_write)
+            if lock_fd is not None:
+                os.close(lock_fd)
             if self._log_handle:
                 self._log_handle.close()
                 self._log_handle = None
@@ -330,6 +376,15 @@ class ManagedTTS:
     def _terminate(self):
         proc = self._process
         self._process = None
+        # Closing this descriptor is also a safe shutdown signal for a
+        # managed_entry child; on exec restart it closes automatically.
+        guardian = self._parent_write_fd
+        self._parent_write_fd = None
+        if guardian is not None:
+            try:
+                os.close(guardian)
+            except OSError:
+                pass
         if proc is None:
             return
         if proc.poll() is None:
@@ -486,6 +541,12 @@ class ManagedTTS:
                 except ImportError:
                     from queue_bridge import BROKER
                 tts_active = BROKER.active()
+                # During an exec restart, the old managed worker may briefly
+                # own the lock/port while it exits. Recheck and start exactly
+                # one replacement as soon as it is gone, even when idle.
+                # Do not spawn while a real ComfyUI job is running.
+                if not self._running() and not self._queue_has_real_running():
+                    self._spawn()
                 # Pending workflows are not using the GPU; their submission
                 # already triggered one cache-reclaim attempt via on_prompt.
                 # Do not repeatedly pause an idle API while they sit queued.
