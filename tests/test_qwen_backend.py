@@ -180,3 +180,46 @@ def test_reject_invalid_model_without_writing(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="Unknown model"):
         manager.configure_active_model("../../malicious")
     assert not (tmp_path / ".env").exists()
+
+
+
+def test_qwen_base_rejects_delivery_instructions(monkeypatch):
+    engine, model = fake_engine(monkeypatch)
+    with pytest.raises(ValueError, match="has no delivery-instruction input"):
+        engine.generate(
+            "qwen3-tts-1.7b-base", "Exact text", instructions="Whisper",
+            reference_path="/tmp/unused.wav",
+        )
+    assert model.calls == []
+
+
+def test_small_qwen_customvoice_does_not_silently_ignore_style(monkeypatch):
+    engine, model = fake_engine(monkeypatch)
+    with pytest.raises(ValueError, match="does not support delivery instructions"):
+        engine.generate(
+            "qwen3-tts-0.6b-customvoice", "Exact text",
+            voice="Ryan", instructions="Whisper",
+        )
+    assert model.calls == []
+
+
+def test_switching_back_to_voxcpm_releases_qwen_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "STORE", server.VoiceStore(tmp_path))
+    engine, _ = fake_engine(monkeypatch)
+    engine._model = FakeModel()
+    engine._model_id = QWEN_DEFAULT
+    monkeypatch.setattr(server, "QWEN_ENGINE", engine)
+    calls = []
+
+    def vox_generate(text, **kwargs):
+        calls.append(text)
+        assert not engine.loaded
+        return fake_wav()
+
+    monkeypatch.setattr(server.ENGINE, "generate_with_delivery", vox_generate)
+    result = TestClient(server.app).post("/v1/audio/speech", json={
+        "model": "voxcpm2", "input": "Back on Vox", "response_format": "wav",
+    })
+    assert result.status_code == 200, result.text
+    assert calls == ["Back on Vox"]
+    assert not engine.loaded
