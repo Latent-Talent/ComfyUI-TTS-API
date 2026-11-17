@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hmac
 import logging
 import os
 from urllib.parse import urlsplit
@@ -14,6 +15,7 @@ from urllib.parse import urlsplit
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, web
 
 from .managed_service import _MANAGER
+from .queue_bridge import BROKER
 
 LOG = logging.getLogger("comfyui-tts-api")
 BASE = "/tts-api"
@@ -121,6 +123,59 @@ async def status(_request: web.Request) -> web.Response:
         except (ClientError, asyncio.TimeoutError, OSError, ValueError):
             pass
     return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+
+def _verify_queue_token(request: web.Request) -> bool:
+    expected = _MANAGER.control_token
+    actual = request.headers.get("X-TTS-Control-Token", "")
+    return bool(expected) and hmac.compare_digest(actual, expected)
+
+
+async def queue_acquire(request: web.Request) -> web.Response:
+    if not _verify_queue_token(request):
+        return _error(403, "Invalid TTS queue control token")
+    if not _MANAGER._running():
+        return _error(503, "Queue reservations require the managed TTS worker")
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise ValueError("Invalid queue request")
+        from server import PromptServer
+        prompt_id = BROKER.create(
+            data.get("ticket"), PromptServer.instance,
+            data.get("kind", "speech"),
+        )
+    except (ValueError, TypeError) as exc:
+        return _error(422, str(exc))
+    except (RuntimeError, AttributeError):
+        return _error(503, "ComfyUI prompt queue is unavailable")
+    return web.json_response({"prompt_id": prompt_id, "state": "pending"})
+
+
+async def queue_state(request: web.Request) -> web.Response:
+    if not _verify_queue_token(request):
+        return _error(403, "Invalid TTS queue control token")
+    try:
+        data = await request.json()
+        from server import PromptServer
+        state = BROKER.state(data.get("ticket"), PromptServer.instance.prompt_queue)
+    except (AttributeError, ValueError, TypeError):
+        state = "cancelled"
+    return web.json_response({"state": state})
+
+
+async def queue_release(request: web.Request) -> web.Response:
+    if not _verify_queue_token(request):
+        return _error(403, "Invalid TTS queue control token")
+    try:
+        data = await request.json()
+        ticket = data.get("ticket")
+        if not isinstance(ticket, str):
+            raise ValueError("Invalid queue request")
+        released = BROKER.release(ticket)
+    except (ValueError, TypeError):
+        return _error(422, "Invalid queue request")
+    return web.json_response({"released": released})
 
 
 async def models(_request: web.Request) -> web.Response:
@@ -278,6 +333,9 @@ def register_routes():
     from server import PromptServer
     routes = PromptServer.instance.routes
     routes.get(BASE + "/status")(status)
+    routes.post(BASE + "/queue/acquire")(queue_acquire)
+    routes.post(BASE + "/queue/state")(queue_state)
+    routes.post(BASE + "/queue/release")(queue_release)
     routes.get(BASE + "/models")(models)
     routes.post(BASE + "/models/download")(download_model)
     routes.get(BASE + "/models/download/status")(model_download_status)
