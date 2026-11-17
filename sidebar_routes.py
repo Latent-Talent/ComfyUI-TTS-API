@@ -188,6 +188,23 @@ async def models(_request: web.Request) -> web.Response:
     return await _forward("GET", "/api/models")
 
 
+async def model_defaults(_request: web.Request) -> web.Response:
+    return await _forward("GET", "/api/models/defaults")
+
+
+async def save_model_defaults(request: web.Request) -> web.Response:
+    origin = request.headers.get("Origin")
+    if origin and urlsplit(origin).netloc != request.host:
+        return _error(403, "Model settings must originate from the ComfyUI page")
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Expected a JSON object")
+    except (ValueError, TypeError):
+        return _error(400, "Invalid model defaults request")
+    return await _forward("POST", "/api/models/defaults", payload=payload)
+
+
 async def model_download_status(_request: web.Request) -> web.Response:
     return await _forward("GET", "/api/models/download/status")
 
@@ -343,6 +360,8 @@ def register_routes():
     routes.post(BASE + "/queue/state")(queue_state)
     routes.post(BASE + "/queue/release")(queue_release)
     routes.get(BASE + "/models")(models)
+    routes.get(BASE + "/models/defaults")(model_defaults)
+    routes.post(BASE + "/models/defaults")(save_model_defaults)
     routes.post(BASE + "/models/download")(download_model)
     routes.get(BASE + "/models/download/status")(model_download_status)
     routes.post(BASE + "/settings/model")(select_model)
