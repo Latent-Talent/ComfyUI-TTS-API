@@ -170,6 +170,54 @@ function mount(container) {
     root.querySelectorAll("[data-tab]").forEach((tab) =>
         tab.addEventListener("click", () => activeTab(tab.dataset.tab)));
 
+    async function refreshModels() {
+        const data = await (await request("/models")).json();
+        if (destroyed) return;
+        modelList = data.models || modelList;
+        const activeModel = data.active_model || "voxcpm2";
+        const selectors = [$("[data-selected-model]"), $("[data-test-model]")];
+        for (const selector of selectors) {
+            const selected = modelChoicesInitialized ? selector.value : activeModel;
+            selector.replaceChildren();
+            for (const model of modelList) {
+                selector.add(new Option(model.label || model.id, model.id));
+            }
+            if ([...selector.options].some((item) => item.value === selected)) {
+                selector.value = selected;
+            }
+        }
+        if (!modelChoicesInitialized && activeModel.startsWith("qwen3-tts")) {
+            $("[data-design-model]").value = "qwen3-tts-1.7b-voicedesign";
+        }
+        modelChoicesInitialized = true;
+        updateTestModelNote();
+        refreshVoices().catch(() => {});
+    }
+
+    function updateTestModelNote() {
+        const id = $("[data-test-model]").value;
+        const note = $("[data-test-model-note]");
+        if (id.endsWith("-base")) {
+            note.textContent = "Base clones a saved recording. Select a saved voice; built-in speakers are not available. Steps are VoxCPM-only.";
+        } else if (id.endsWith("-voicedesign")) {
+            note.textContent = "VoiceDesign uses delivery instructions as a separate voice description. Saved voices use Base automatically.";
+        } else if (id.startsWith("qwen3-tts")) {
+            note.textContent = "CustomVoice has nine named speakers. Saved voice recordings use the Qwen Base checkpoint automatically. Steps are VoxCPM-only.";
+        } else {
+            note.textContent = "VoxCPM2: use a saved character voice or default. Voice/delivery style can use a short cached reference.";
+        }
+    }
+
+    async function refreshDownloadStatus() {
+        const status = await (await request("/models/download/status")).json();
+        if (destroyed) return;
+        const box = $("[data-download-status]");
+        if (status.state === "downloading") box.textContent = "Downloading " + status.model_id + " to Hugging Face cache. Check the TTS worker log for detailed progress.";
+        else if (status.state === "complete") box.textContent = "Downloaded: " + status.model_id;
+        else if (status.state === "failed") box.textContent = "Download failed for " + status.model_id + ": " + status.error;
+        else box.textContent = "Qwen weights download on first use or by clicking Download.";
+    }
+
     async function refreshStatus() {
         const result = await (await request("/status")).json();
         if (destroyed) return;
@@ -182,7 +230,12 @@ function mount(container) {
             : h.paused ? "Paused — ComfyUI is using the GPU."
             : h.loaded ? "Online · Speech model loaded" : "Online · Model loads on demand";
         $("[data-service]").textContent = ok ? (result.running ? "Managed · online" : "External · online") : "Offline";
-        $("[data-model]").textContent = h?.model || "VoxCPM2";
+        $("[data-model]").textContent = h?.loaded_model || h?.active_model || h?.model || "VoxCPM2";
+        const modelSelected = $("[data-selected-model]").value;
+        $("[data-model-hint]").textContent = h?.qwen_installed === false && modelSelected.startsWith("qwen3-tts")
+            ? "Qwen runtime missing: run bash install-qwen.sh in the TTS custom node folder, then restart its API. Model weights download separately."
+            : "Selecting a model as API default restarts only the TTS service. SillyTavern tts-1 aliases follow this default.";
+        $("[data-action=apply-model]").disabled = result.active_model_editable === false;
         $("[data-version]").textContent = h?.version || "Older release";
         $("[data-memory]").textContent = !ok ? "Unavailable" : h.paused ? "Released / paused" : h.loaded ? "Loaded in VRAM" : "Unloaded";
         $("[data-allocator]").textContent = h?.cuda_allocator || "Unknown";
@@ -210,6 +263,12 @@ function mount(container) {
         const select = $("[data-test-voice]");
         const choice = select.value;
         select.replaceChildren(new Option("Default voice", "default"));
+        const chosenModel = $("[data-test-model]").value;
+        if (chosenModel.startsWith("qwen3-tts") && chosenModel.endsWith("customvoice")) {
+            for (const speaker of qwenSpeakers) {
+                select.add(new Option("Qwen · " + speaker, speaker));
+            }
+        }
         if (!voices.length) {
             const empty = document.createElement("p");
             empty.className = "tts-muted";
@@ -284,6 +343,37 @@ function mount(container) {
     $("[data-action=restart]").addEventListener("click", (e) => perform(
         e.currentTarget, () => request("/server/restart", { method: "POST" }),
         "Speech API is restarting."));
+    $("[data-test-model]").addEventListener("change", () => {
+        updateTestModelNote();
+        refreshVoices().catch((err) => feedback(err.message, true));
+    });
+    $("[data-action=apply-model]").addEventListener("click", (e) => perform(
+        e.currentTarget, async () => {
+            const id = $("[data-selected-model]").value;
+            const result = await (await request("/settings/model", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ model_id: id }),
+            })).json();
+            $("[data-test-model]").value = id;
+            updateTestModelNote();
+            refreshVoices().catch(() => {});
+            feedback("Default model set to " + result.active_model + ". The TTS API is restarting; ComfyUI stays running.");
+        }
+    ));
+    $("[data-action=download-model]").addEventListener("click", (e) => perform(
+        e.currentTarget, async () => {
+            const id = $("[data-selected-model]").value;
+            if (!id.startsWith("qwen3-tts")) {
+                throw new Error("Choose a Qwen3-TTS model to download.");
+            }
+            await request("/models/download", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ model_id: id }),
+            });
+            await refreshDownloadStatus();
+        }
+    ));
+
 
     // API keys are stored server-side in .env; only a newly generated key is
     // returned once. Never include credentials in passive status responses.
@@ -326,6 +416,7 @@ function mount(container) {
         e.currentTarget,
         async () => {
             const body = {
+                model: $("[data-design-model]").value,
                 name: $("[data-design-name]").value.trim(),
                 description: $("[data-design-description]").value.trim(),
                 sample_text: $("[data-design-sample]").value,
@@ -363,7 +454,8 @@ function mount(container) {
         e.currentTarget,
         async () => {
             const body = {
-                model: "voxcpm2",
+                model: $("[data-test-model]").value,
+                language: $("[data-test-language]").value,
                 voice: $("[data-test-voice]").value,
                 input: $("[data-test-text]").value,
                 instructions: $("[data-test-delivery]").value.trim(),
@@ -384,10 +476,13 @@ function mount(container) {
             player.play().catch(() => {});
         }, "Generation complete."));
 
+    refreshModels().catch((e) => feedback(e.message, true));
+    refreshDownloadStatus().catch(() => {});
     refreshStatus().catch((e) => feedback(e.message, true));
     timer = window.setInterval(() => {
         if (!destroyed && document.visibilityState !== "hidden") {
             refreshStatus().catch(() => {});
+            refreshDownloadStatus().catch(() => {});
         }
     }, 4000);
 
