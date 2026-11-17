@@ -47,7 +47,7 @@ def test_list_models_exposes_aliases():
     models = {entry["id"]: entry for entry in response.json()["data"]}
     assert models["voxcpm2"]["owned_by"] == "local"
     assert models["tts-1"]["owned_by"] == "local-active-backend-alias"
-    assert models["gpt-4o-mini-tts"]["owned_by"] == "local-voxcpm2-alias"
+    assert models["gpt-4o-mini-tts"]["owned_by"] == "local-active-backend-alias"
 
 
 def test_unknown_model_still_rejected(monkeypatch, tmp_path):
