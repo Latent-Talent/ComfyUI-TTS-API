@@ -153,20 +153,20 @@ def test_queue_client_waits_until_active_and_releases_when_finished():
     events = []
 
     class Client(QueueClient):
-        def _post(self, endpoint, ticket, kind="speech"):
-            events.append((endpoint, kind))
+        def _post(self, endpoint, ticket, kind="speech", status=None):
+            events.append((endpoint, kind, status))
             if endpoint == "acquire":
                 return {"state": "pending"}
             if endpoint == "state":
-                return {"state": "pending" if events.count(("state", "speech")) == 1 else "running"}
+                return {"state": "pending" if len([x for x in events if x[0] == "state"]) == 1 else "running"}
             return {"released": True}
 
     client = Client(url="http://127.0.0.1:8188/tts-api/queue", token="test")
     ticket = client.acquire("speech")
     assert ticket
     client.release(ticket)
-    assert events[0] == ("acquire", "speech")
-    assert events[-1] == ("release", "speech")
+    assert events[0] == ("acquire", "speech", None)
+    assert events[-1] == ("release", "speech", "completed")
 
 
 def test_no_comfyui_queue_bridge_is_only_allowed_for_standalone():
@@ -258,3 +258,59 @@ def test_completed_history_label_retains_voice_design_operation():
     worker.join(timeout=2)
     assert not worker.is_alive()
     assert outputs == [completion_ui("speech")]
+
+
+def test_failed_speech_request_leaves_failed_comfyui_history_not_completed():
+    broker = QueueBroker()
+    srv = FakePromptServer()
+    manager = FakeManager()
+    broker.configure(manager)
+    ticket = new_ticket()
+    broker.create(ticket, srv, kind="speech")
+    srv.prompt_queue.start_next()
+    errors = []
+
+    def run():
+        try:
+            broker.execute(ticket)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    deadline = time.monotonic() + 2
+    while broker.state(ticket, srv.prompt_queue) != "running":
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert broker.release(ticket, status="failed")
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert errors == ["TTS queue operation did not complete"]
+    assert not broker.active()
+
+
+def test_context_manager_reports_success_or_failure_without_speech_text(monkeypatch):
+    import tts_api.comfy_queue as bridge
+    outcomes = []
+
+    class FakeQueueClient:
+        def acquire(self, kind):
+            return "fake-ticket"
+
+        def release(self, ticket, status="completed"):
+            outcomes.append((ticket, status))
+
+    monkeypatch.setattr(bridge, "QueueClient", FakeQueueClient)
+
+    async def run():
+        async with bridge.queued_tts("speech"):
+            pass
+        with pytest.raises(ValueError):
+            async with bridge.queued_tts("voice_design"):
+                raise ValueError("sensitive user text")
+
+    asyncio.run(run())
+    assert outcomes == [
+        ("fake-ticket", "completed"),
+        ("fake-ticket", "failed"),
+    ]
