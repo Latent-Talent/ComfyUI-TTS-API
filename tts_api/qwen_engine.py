@@ -20,7 +20,7 @@ import soundfile as sf
 
 from .operations import emit
 from .comfy_queue import active_request_kind, require_queue_reservation
-from .memory import release_unused_cuda
+from .memory import is_memory_exhaustion, release_unused_cuda
 
 from .models import QWEN_MODELS, QWEN_SPEAKERS_LOOKUP
 
@@ -264,8 +264,10 @@ class QwenEngine:
                                    "message": str(exc)[:1000]}
                 emit("generation.failed", backend="qwen3-tts",
                      model=model_id, error_type=type(exc).__name__)
+                if is_memory_exhaustion(exc):
+                    self._unload_locked()
                 raise
             finally:
                 self._last_activity = time.monotonic()
-                if self.unload_after_request:
+                if self.unload_after_request and self.loaded:
                     self._unload_locked()
