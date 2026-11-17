@@ -14,7 +14,7 @@ from tts_api.storage import VoiceStore
 
 
 def recording(freq=220, sample_rate=24000):
-    t = np.arange(6000) / sample_rate
+    t = np.arange(9600) / sample_rate
     sample = (0.1 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
     wav = io.BytesIO()
     sf.write(wav, sample, sample_rate, format="WAV", subtype="PCM_16")
@@ -186,4 +186,4 @@ def test_legacy_voice_records_remain_editable(tmp_path):
     )
     assert saved["id"] == voice_id
     assert saved["name"] == "Updated legacy"
-    assert saved["created_at"] if "created_at" in saved else True
+    assert "created_at" not in saved\n    assert "updated_at" in saved
