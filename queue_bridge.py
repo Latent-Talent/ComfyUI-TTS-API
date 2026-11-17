@@ -39,7 +39,7 @@ class QueueBroker:
 
     def active(self) -> bool:
         with self._lock:
-            return any(slot.state in ("activating", "running")
+            return any(slot.state in ("activating", "running", "releasing")
                        for slot in self._slots.values())
 
     def outstanding(self) -> bool:
@@ -107,7 +107,7 @@ class QueueBroker:
             was_pending = slot.state in ("pending", "cancelled")
             slot.done.set()
             if slot.state != "cancelled":
-                slot.state = "completed"
+                slot.state = "completed" if was_pending else "releasing"
             if was_pending:
                 # Never leave an abandoned waiting job in ComfyUI's queue.
                 if self._queue is not None:
