@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
         await anyio.to_thread.run_sync(ENGINE.unload)
 
 
-app = FastAPI(title="ComfyUI TTS API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="ComfyUI TTS API", version="0.4.1", lifespan=lifespan)
 
 
 async def authenticate(authorization: str | None = Header(default=None),
@@ -102,6 +102,54 @@ class DesignRequest(BaseModel):
     seed: int | None = None
 
 
+def _resolve_voice(value: str) -> dict | None:
+    """Resolve a SillyTavern voice by saved ID, unique name, or built-in alias.
+
+    SillyTavern treats comma-separated voice entries as literal strings, so
+    entries such as " Nova " need whitespace and case normalization. Never
+    silently fall back to default for an unknown character.
+    """
+    requested = value.strip()
+    if not requested:
+        raise HTTPException(
+            status_code=404, detail="Empty voice name. Use 'default' or a saved voice ID/name."
+        )
+
+    saved = STORE.list()
+    # First preserve exact persistent ID semantics. Name matching is only
+    # performed when there was no exact saved-ID match.
+    for record in saved:
+        if record.get("id") == requested:
+            return record
+
+    matches = [
+        record for record in saved
+        if isinstance(record.get("name"), str)
+        and record["name"].strip().casefold() == requested.casefold()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        identifiers = ", ".join(record["id"] for record in matches)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Voice name {requested!r} is ambiguous. Use a saved voice ID: {identifiers}",
+        )
+
+    if requested.casefold() == "default" or requested.casefold() in OPENAI_VOICE_ALIASES:
+        return None
+
+    available = ["default"] + [record["id"] for record in saved]
+    raise HTTPException(
+        status_code=404,
+        detail=(
+            f"Unknown voice {requested!r}. Use a saved voice ID/name from "
+            "/v1/audio/voices, or an OpenAI default voice such as 'alloy'. "
+            f"Available saved IDs: {', '.join(available[:12])}"
+        ),
+    )
+
+
 def _render(request: SpeechRequest) -> bytes:
     if len(request.input) > MAX_TEXT:
         raise ValueError(f"Input longer than {MAX_TEXT} characters")
@@ -110,13 +158,7 @@ def _render(request: SpeechRequest) -> bytes:
             f"Unknown model: {request.model!r}. Set SillyTavern's model to "
             "'voxcpm2' or use its default 'tts-1' compatibility alias."
         )
-    # OpenAI voice names are aliases, not different pretrained voices.
-    voice_id = ("default" if request.voice == "default"
-                or request.voice.lower() in OPENAI_VOICE_ALIASES
-                else request.voice)
-    voice = None if voice_id == "default" else STORE.get(voice_id)
-    if voice_id != "default" and voice is None:
-        raise KeyError(f"Unknown voice ID: {request.voice!r}. Use 'default' or a saved voice_... ID.")
+    voice = _resolve_voice(request.voice)
     ref = str(STORE.audio_path(voice)) if voice and voice.get("reference_file") else None
     # Unlike direct VoxCPM2 prefixing, this produces ONLY request.input as
     # final spoken text. A short, cached voice-reference pass carries delivery
@@ -133,7 +175,7 @@ def _render(request: SpeechRequest) -> bytes:
 async def health():
     return {"ok": True, "service": "comfyui-tts-api", "model": MODEL,
             "cuda_allocator": os.environ.get("PYTORCH_ALLOC_CONF", os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "backend:native")),
-            "loaded": ENGINE.loaded, "paused": ENGINE.paused,
+            "version": app.version, "loaded": ENGINE.loaded, "paused": ENGINE.paused,
             "compile_enabled": ENGINE.optimize,
             "compile_fallback_used": ENGINE.compile_fallback_used,
             "last_error": ENGINE.last_error,
@@ -181,6 +223,10 @@ async def voices():
 async def speech(request: SpeechRequest):
     try:
         audio = await anyio.to_thread.run_sync(_render, request)
+    except HTTPException:
+        # Preserve 404/422 voice lookup details rather than wrapping them in
+        # an unrelated 503 generation error.
+        raise
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
