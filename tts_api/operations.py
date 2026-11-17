@@ -95,15 +95,20 @@ def emit(event: str, **metadata) -> dict:
     line = json.dumps(item, ensure_ascii=True, separators=(",", ":"))
     with _LOCK:
         if _FILE is not None:
-            if _FILE.exists() and _FILE.stat().st_size + len(line) + 1 > MAX_BYTES:
-                for n in range(BACKUPS, 0, -1):
-                    current = _FILE.with_name("operations.log." + str(n))
-                    predecessor = (_FILE if n == 1
-                                   else _FILE.with_name("operations.log." + str(n - 1)))
-                    if predecessor.exists():
-                        os.replace(predecessor, current)
-            with _FILE.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            try:
+                if _FILE.exists() and _FILE.stat().st_size + len(line) + 1 > MAX_BYTES:
+                    for n in range(BACKUPS, 0, -1):
+                        current = _FILE.with_name("operations.log." + str(n))
+                        predecessor = (_FILE if n == 1
+                                       else _FILE.with_name("operations.log." + str(n - 1)))
+                        if predecessor.exists():
+                            os.replace(predecessor, current)
+                fd = os.open(_FILE, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+            except OSError:
+                # Log storage failures must never interrupt an audio job.
+                pass
     LOGGER.info("[TTS EVENT] %s", line)
     return item
 
