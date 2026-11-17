@@ -28,10 +28,14 @@ class QueueClient:
         self.url = (url if url is not None else os.getenv("TTS_COMFY_QUEUE_URL", "")).rstrip("/")
         self.token = token if token is not None else os.getenv("TTS_CONTROL_TOKEN", "")
 
-    def _post(self, endpoint: str, ticket: str, kind: str = "speech") -> dict:
+    def _post(self, endpoint: str, ticket: str, kind: str = "speech",
+              status: str | None = None) -> dict:
         if not self.url or not self.token:
             raise QueueUnavailable("Managed TTS queue bridge is unconfigured")
-        data = json.dumps({"ticket": ticket, "kind": kind}).encode("ascii")
+        payload = {"ticket": ticket, "kind": kind}
+        if endpoint == "release" and status is not None:
+            payload["status"] = status
+        data = json.dumps(payload).encode("ascii")
         request = urllib.request.Request(
             self.url + "/" + endpoint, data=data, method="POST",
             headers={"Content-Type": "application/json",
@@ -81,22 +85,27 @@ class QueueClient:
                 pass
             raise
 
-    def release(self, ticket: str | None):
+    def release(self, ticket: str | None, status: str = "completed"):
         if ticket:
-            self._post("release", ticket)
+            self._post("release", ticket, status=status)
 
 
 @asynccontextmanager
 async def queued_tts(kind: str):
     client = QueueClient()
     ticket = await anyio.to_thread.run_sync(client.acquire, kind)
+    succeeded = False
     try:
         yield
+        succeeded = True
     finally:
         if ticket:
             try:
-                # Release even if audio encoding or synthesis failed. Avoid
-                # suppressing the original generation error if release fails.
-                await anyio.to_thread.run_sync(client.release, ticket)
+                # Successful API responses get a TTS completion marker.
+                # Failed/cancelled requests remain failed in ComfyUI history.
+                await anyio.to_thread.run_sync(
+                    client.release, ticket,
+                    "completed" if succeeded else "failed",
+                )
             except QueueUnavailable:
                 pass
