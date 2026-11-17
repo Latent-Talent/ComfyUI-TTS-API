@@ -289,15 +289,46 @@ def _pause_both() -> bool:
     return vox_ok and qwen_ok
 
 
-def _resume_both():
+def _resume_both() -> bool:
+    was_paused = ENGINE.paused or QWEN_ENGINE.paused
     ENGINE.resume()
     QWEN_ENGINE.resume()
+    return was_paused
 
 
 def _unload_both():
     with INFERENCE_LOCK:
         ENGINE.unload()
         QWEN_ENGINE.unload()
+
+
+def _reclaim_idle_gpu() -> tuple[bool, bool]:
+    """Reclaim cached TTS models without pausing the API worker.
+
+    A managed TTS request is only allowed to generate after its ComfyUI queue
+    reservation runs, so a normal workflow doesn't need to pause an idle
+    speech service. Nonblocking acquisition prevents reclaim from waiting
+    for or silently interrupting a generation already in progress.
+    """
+    if not INFERENCE_LOCK.acquire(blocking=False):
+        return False, False
+    try:
+        was_loaded = ENGINE.loaded or QWEN_ENGINE.loaded
+        if was_loaded:
+            ENGINE.unload()
+            QWEN_ENGINE.unload()
+        return True, was_loaded
+    finally:
+        INFERENCE_LOCK.release()
+
+
+@app.post("/api/internal/reclaim", include_in_schema=False)
+async def internal_reclaim(x_tts_control_token: str | None = Header(default=None)):
+    _authorize_control(x_tts_control_token)
+    ready, reclaimed = await anyio.to_thread.run_sync(_reclaim_idle_gpu)
+    if not ready:
+        raise HTTPException(409, "TTS inference is active; cannot reclaim GPU")
+    return {"ready": True, "reclaimed": reclaimed, "paused": False}
 
 
 @app.post("/api/internal/pause", include_in_schema=False)
@@ -313,8 +344,9 @@ async def internal_pause(x_tts_control_token: str | None = Header(default=None))
 @app.post("/api/internal/resume", include_in_schema=False)
 async def internal_resume(x_tts_control_token: str | None = Header(default=None)):
     _authorize_control(x_tts_control_token)
-    await anyio.to_thread.run_sync(_resume_both)
-    emit("worker.resumed", reason="workflow", status="running")
+    was_paused = await anyio.to_thread.run_sync(_resume_both)
+    if was_paused:
+        emit("worker.resumed", reason="workflow", status="running")
     return {"paused": False, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded}
 
 
