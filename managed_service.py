@@ -170,7 +170,7 @@ class ManagedTTS:
             old = destination.read_text(encoding="utf-8") if destination.exists() else ""
             lines = [
                 line for line in old.splitlines()
-                if not re.match(r"^\\s*(?:export\\s+)?TTS_ACTIVE_MODEL\\s*=", line)
+                if not re.match(r"^\s*(?:export\s+)?TTS_ACTIVE_MODEL\s*=", line)
             ]
             lines.append("TTS_ACTIVE_MODEL=" + canonical)
             self.root.mkdir(parents=True, exist_ok=True)
@@ -182,7 +182,7 @@ class ManagedTTS:
                 ) as fh:
                     temporary = fh.name
                     os.chmod(temporary, 0o600)
-                    fh.write("\\n".join(lines) + "\\n")
+                    fh.write("\n".join(lines) + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.replace(temporary, destination)
