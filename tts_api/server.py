@@ -426,7 +426,9 @@ async def speech(request: SpeechRequest):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
-        LOG.exception("[TTS API] Speech error")
+        # Do not log third-party exception messages or tracebacks: they can
+        # contain user input in their argument values.
+        emit("generation.failed", error_type=type(exc).__name__, kind="speech")
         resolved = canonical_model(request.model, ACTIVE_MODEL, MODEL)
         engine = QWEN_ENGINE if is_qwen(resolved) else ENGINE
         if engine.last_error is None:
@@ -530,7 +532,7 @@ async def design_voice(request: DesignRequest):
     try:
         audio = await anyio.to_thread.run_sync(_design_voice, request)
     except Exception as exc:
-        LOG.exception("[TTS API] Voice design error")
+        emit("voice.design.failed", error_type=type(exc).__name__, kind="voice_design")
         raise HTTPException(503, f"Voice design failed: {exc}") from exc
     record = STORE.create(
         name=request.name, description=request.description,
