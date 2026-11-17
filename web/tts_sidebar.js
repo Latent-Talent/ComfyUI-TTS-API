@@ -50,6 +50,16 @@ function template() {
           <button type="button" data-action="unload">Unload model</button>
           <button type="button" data-action="restart">Restart API</button>
         </div>
+        <div class="tts-section-title">Speech model</div>
+        <label>Default API backend<select data-selected-model>
+          <option value="voxcpm2">VoxCPM2</option>
+        </select></label>
+        <div class="tts-actions">
+          <button type="button" data-action="apply-model">Make API default</button>
+          <button type="button" data-action="download-model">Download Qwen weights</button>
+        </div>
+        <p class="tts-hint" data-model-hint>Models load on demand. Switching the default restarts only the managed TTS API, not ComfyUI.</p>
+        <p class="tts-hint" data-download-status>No model download active.</p>
         <div class="tts-section-title">Connection</div>
         <div class="tts-endpoint">
           <code data-endpoint>http://127.0.0.1:8025/v1/audio/speech</code>
@@ -78,6 +88,10 @@ function template() {
         <details class="tts-accordion">
           <summary>Design voice from description</summary>
           <label>Voice name<input data-design-name type="text" maxlength="120" placeholder="Narrator" value="Narrator"></label>
+          <label>Voice design backend<select data-design-model>
+            <option value="voxcpm2">VoxCPM2</option>
+            <option value="qwen3-tts-1.7b-voicedesign">Qwen3-TTS 1.7B VoiceDesign</option>
+          </select></label>
           <label>Description<textarea data-design-description rows="3" placeholder="Deep, calm adult voice with a warm tone"></textarea></label>
           <label>Sample text<textarea data-design-sample rows="2">Hello, this is my new voice.</textarea></label>
           <label>Seed<input data-design-seed type="number" value="42" min="0" max="2147483647"></label>
@@ -94,6 +108,22 @@ function template() {
       </div>
       <div class="tts-panel" data-panel="test" hidden>
         <div class="tts-section-title">Test speech generation</div>
+        <label>Speech backend<select data-test-model>
+          <option value="voxcpm2">VoxCPM2</option>
+        </select></label>
+        <label>Language<select data-test-language>
+          <option value="Auto">Auto detect</option>
+          <option value="English">English</option>
+          <option value="Chinese">Chinese</option>
+          <option value="Japanese">Japanese</option>
+          <option value="Korean">Korean</option>
+          <option value="German">German</option>
+          <option value="French">French</option>
+          <option value="Spanish">Spanish</option>
+          <option value="Italian">Italian</option>
+          <option value="Portuguese">Portuguese</option>
+          <option value="Russian">Russian</option>
+        </select></label>
         <label>Character voice<select data-test-voice><option value="default">Default voice</option></select></label>
         <label>Text<textarea data-test-text rows="5">Hello! This is a test of my local text to speech server.</textarea></label>
         <label>Delivery instructions (optional)<textarea data-test-delivery rows="2" placeholder="Warm and relaxed"></textarea></label>
@@ -101,6 +131,7 @@ function template() {
           <label>Seed<input data-test-seed type="number" value="42" min="0" max="2147483647"></label>
           <label>Steps<input data-test-steps type="number" value="10" min="1" max="100"></label>
         </div>
+        <p class="tts-hint" data-test-model-note>Qwen3-TTS has separate CustomVoice, VoiceDesign, and Base checkpoints. Saved voice references use Base automatically.</p>
         <button type="button" class="tts-primary" data-action="generate">Generate speech</button>
         <audio data-audio controls hidden></audio>
       </div>
@@ -115,6 +146,10 @@ function mount(container) {
     let timer = null;
     let audioURL = null;
     let destroyed = false;
+    let modelList = [{ id: "voxcpm2", label: "VoxCPM2", kind: "voxcpm" }];
+    let modelChoicesInitialized = false;
+    const qwenSpeakers = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric",
+                          "Ryan", "Aiden", "Ono_Anna", "Sohee"];
     const $ = (selector) => root.querySelector(selector);
 
     function feedback(message, isError = false) {
