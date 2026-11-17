@@ -17,11 +17,35 @@ LOG = logging.getLogger("comfyui-tts-api")
 TICKET_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SLOT_MAX_SECONDS = 1800
 
+# The ComfyUI frontend chooses a completed job's display label from its
+# preview output filename. A tiny *inline text* UI output therefore gives
+# jobs a visible TTS label without creating an audio file, exporting speech,
+# or altering ComfyUI's frontend.
+COMPLETION_LABELS = {
+    "speech": "TTS · Speech completed",
+    "voice_design": "TTS · Voice design completed",
+}
+
+
+def completion_ui(kind: str) -> dict:
+    label = COMPLETION_LABELS[kind]
+    return {
+        "ui": {
+            "text": [{
+                "filename": label,
+                "content": label + ". Audio was returned through the TTS API.",
+                "type": "temp",
+                "subfolder": "",
+            }]
+        }
+    }
+
 
 @dataclass
 class Slot:
     ticket: str
     prompt_id: str
+    kind: str = "speech"
     created: float = field(default_factory=time.monotonic)
     state: str = "pending"
     done: threading.Event = field(default_factory=threading.Event)
@@ -59,7 +83,7 @@ class QueueBroker:
             if ticket in self._slots:
                 raise ValueError("TTS queue ticket already exists")
             prompt_id = str(uuid.uuid4())
-            self._slots[ticket] = Slot(ticket=ticket, prompt_id=prompt_id)
+            self._slots[ticket] = Slot(ticket=ticket, prompt_id=prompt_id, kind=kind)
             # Private node is not part of the user's graph; it reserves one
             # actual queued execution, with no audio or transcript in inputs.
             prompt = {
@@ -166,14 +190,14 @@ class QueueBroker:
                 slot.state = "completed"
                 self._slots.pop(ticket, None)
             LOG.info("[TTS API] TTS queue slot released %s", slot.prompt_id)
-        return ()
+        return completion_ui(slot.kind)
 
 
 BROKER = QueueBroker()
 
 
 class TTSQueueSlot:
-    """Internal queue reservation; never carries speech content."""
+    """Internal queue reservation; reports a content-free TTS history label."""
 
     @classmethod
     def INPUT_TYPES(cls):
