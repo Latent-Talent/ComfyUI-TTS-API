@@ -45,3 +45,16 @@ def process_cuda_memory() -> dict:
         return {"available": True, "devices": devices}
     except Exception:
         return {"available": False, "reason": "cuda_metrics_unavailable"}
+
+
+def is_memory_exhaustion(error: BaseException) -> bool:
+    """Recognize allocator exhaustion without importing Torch or parsing logs."""
+    if isinstance(error, MemoryError):
+        return True
+    if type(error).__name__ in ("OutOfMemoryError", "CUDAOutOfMemoryError"):
+        return True
+    # Torch versions and CUDA backends can report OOM as RuntimeError.
+    message = str(error).lower()
+    return ("cuda out of memory" in message or
+            "cuda error: out of memory" in message or
+            "outofmemoryerror" in message)
