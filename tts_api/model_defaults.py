@@ -30,15 +30,22 @@ def field(name: str, label: str, kind: str, default, **options) -> dict:
             "default": default, **options}
 
 
-def common_fields() -> list[dict]:
-    return [
-        field("voice", "Default voice", "text", "default", max_length=120,
-              hint="Saved voice ID/name, preset speaker, or default"),
+def common_fields(*, include_voice: bool = True) -> list[dict]:
+    fields = [
         field("response_format", "Audio format", "select", "mp3", options=list(FORMATS)),
         field("speed", "Playback speed", "number", 1.0, min=0.25, max=4.0, step=0.05),
         field("seed", "Seed (blank = random)", "nullable_integer", None,
               min=0, max=2147483647),
     ]
+    if include_voice:
+        fields.insert(0, field(
+            "voice", "Default voice", "audio_voice", "default", max_length=120,
+            hint="Select a saved voice or browse for a reference recording.",
+            audio_reference=True,
+        ))
+    return fields
+
+
 
 
 def schema_for(model_id: str) -> list[dict]:
@@ -56,20 +63,25 @@ def schema_for(model_id: str) -> list[dict]:
             field("emotion_mode", "Emotion source", "select", "neutral",
                   options=["neutral", "auto", "text", "vector", "reference"]),
             field("instructions", "Emotion description", "textarea", "",
-                  max_length=1000, hint="Used with emotion source: text"),
+                  max_length=1000, hint="Used with emotion source: text",
+                  visible_when={"emotion_mode": ["text"]}),
             field("emotion_vector", "Emotion vector", "vector",
                   [0.0] * len(INDEX_EMOTIONS),
-                  emotions=list(INDEX_EMOTIONS), min=0.0, max=1.0, step=0.05),
+                  emotions=list(INDEX_EMOTIONS), min=0.0, max=1.0, step=0.05,
+                  visible_when={"emotion_mode": ["vector"]}),
             field("emotion_strength", "Emotion strength", "number", 0.65,
-                  min=0.0, max=1.0, step=0.05),
-            field("emotion_reference_voice", "Emotion reference voice", "text", "",
-                  max_length=120, hint="Saved voice ID/name; used with emotion source: reference"),
+                  min=0.0, max=1.0, step=0.05,
+                  visible_when={"emotion_mode": ["auto", "text", "vector", "reference"]}),
+            field("emotion_reference_voice", "Emotion reference audio", "audio_voice", "",
+                  max_length=120, hint="Choose a saved recording or browse for an audio file.",
+                  audio_reference=True, required_saved_voice=True,
+                  visible_when={"emotion_mode": ["reference"]}),
             field("duration_factor", "Duration factor", "number", 1.0,
                   min=0.5, max=2.0, step=0.05),
         ]
     if model_id in QWEN_MODELS:
         kind = QWEN_MODELS[model_id]["kind"]
-        result = common_fields() + [
+        result = common_fields(include_voice=kind != "voicedesign") + [
             field("language", "Language", "select", "Auto",
                   options=list(QWEN_LANGUAGES)),
         ]
@@ -90,7 +102,7 @@ def builtins_for(model_id: str) -> dict:
 
 def _validate_value(spec: dict, value):
     kind = spec["kind"]
-    if kind in ("text", "textarea"):
+    if kind in ("text", "textarea", "audio_voice"):
         if type(value) is not str or len(value) > spec.get("max_length", 1000):
             raise ValueError("Invalid model default: " + spec["name"])
         return value
