@@ -51,6 +51,8 @@ In **Server → Model-specific defaults**, selecting any model shows only settin
 - **Qwen3-TTS:** voice, audio format, playback speed, seed, and language; delivery instructions are exposed only on checkpoints that support them.
 - **IndexTTS 2.5:** voice, audio format, speed, seed, language, emotion source, emotion description, eight-value vector, emotion strength, emotion-reference voice, and duration factor.
 
+The Server tab shows **context-sensitive inputs**: selecting IndexTTS emotion mode `text` reveals an emotion description, `vector` reveals eight sliders/values, `reference` reveals an emotion audio selector, while `neutral` hides all emotion-specific inputs. Audio-reference fields offer a **saved recording selector and a native local audio file picker** rather than a manually typed path. Selecting a new file requires confirmation of permission to use that recording. Clicking **Save defaults** uploads it through the existing Voice Clone API and saves its registered voice ID; the model profile does not contain raw audio or local file paths. The Test tab also accepts local character and emotion reference audio files.
+
 Click **Save defaults** to persist that model's settings, or **Restore model defaults** to reset just that model to its original values. Defaults take effect on new API requests immediately, without restarting ComfyUI or the TTS worker. **Explicit request fields override saved defaults**, including values like `seed: null` or an empty `instructions` string. The Test tab loads saved defaults when its selected model changes; it always requests WAV audio for local playback.
 
 ### Qwen3-TTS
