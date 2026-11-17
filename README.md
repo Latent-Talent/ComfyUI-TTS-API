@@ -164,6 +164,9 @@ To assign character voices, enter saved voice IDs or unique saved voice names in
 | Endpoint | Function |
 | --- | --- |
 | `GET /api/voices` | List saved voices |
+| `GET /api/voices/{voice_id}` | Inspect an existing voice's metadata |
+| `GET /api/voices/{voice_id}/audio` | Preview the stored reference WAV (authenticated; no-store) |
+| `PATCH /api/voices/{voice_id}` | Edit name, description, reference transcript, and optionally replace reference WAV (multipart form) |
 | `POST /api/voices/clone` | Upload and save a reference recording (multipart form with consent) |
 | `POST /api/voices/design` | Create a saved voice from a description with VoxCPM2 or Qwen VoiceDesign |
 | `DELETE /api/voices/{voice_id}` | Delete a saved voice |
@@ -180,6 +183,8 @@ curl -fS http://127.0.0.1:8025/api/voices/clone \
 ~~~
 
 Use only recordings you have permission to clone.
+
+The **Voices** sidebar tab now includes a searchable voice library. Click **View / Edit** on any saved voice to inspect its ID, description, reference transcript and listen to its existing reference audio. Edit metadata or select a replacement audio file (with permission confirmation) and click **Save voice changes**. The voice ID does not change, so existing SillyTavern assignments and model-default references remain valid. **Use in Test** chooses the voice in the Test tab. Delete warns when a model default references that voice. Reference audio is fetched only when requested, through the authenticated same-origin gateway; no voice data is embedded in queue entries or operational logs.
 
 ## ComfyUI queue and GPU management
 
