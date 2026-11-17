@@ -28,7 +28,7 @@ from pathlib import Path
 LOG = logging.getLogger("comfyui-tts-api")
 ROOT = Path(__file__).resolve().parent
 ALLOWED_CONFIG = {
-    "TTS_HOST", "TTS_PORT", "TTS_MODEL", "TTS_API_KEY",
+    "TTS_HOST", "TTS_PORT", "TTS_MODEL", "TTS_ACTIVE_MODEL", "TTS_API_KEY",
     "TTS_DATA_DIR", "TTS_MAX_TEXT", "TTS_MAX_UPLOAD_MB",
     "TTS_UNLOAD_AFTER_REQUEST", "TTS_IDLE_UNLOAD_SECONDS", "TTS_AUTO_START",
 }
@@ -140,6 +140,61 @@ class ManagedTTS:
                 "configured": True, "restarting": started, "managed": not self._disabled,
                 "key": key if action == "generate" else None,
             }
+
+    def configure_active_model(self, model_id: str) -> dict:
+        """Persist default TTS backend and rotate only the owned child process."""
+        # Import only lightweight model metadata, never CUDA, in ComfyUI.
+        try:
+            from .tts_api.models import canonical_model
+        except ImportError:
+            from tts_api.models import canonical_model
+        if not isinstance(model_id, str):
+            raise ValueError("Model ID must be a string")
+        canonical = canonical_model(
+            model_id, voxcpm_checkpoint=self.config.get("TTS_MODEL", "openbmb/VoxCPM2")
+        )
+        if canonical != model_id:
+            raise ValueError("Select a canonical model ID from the model list")
+
+        with self._lock:
+            if "TTS_ACTIVE_MODEL" in os.environ:
+                raise PermissionError("TTS_ACTIVE_MODEL is controlled by an environment variable")
+            if self._queue_busy():
+                raise RuntimeError("Cannot switch models while ComfyUI has queued workflows")
+            if not self._running() and self._port_open():
+                raise RuntimeError("Cannot configure an independently started service")
+            if self.config.get("TTS_ACTIVE_MODEL", "voxcpm2") == canonical:
+                return {"active_model": canonical, "restarting": False}
+
+            destination = self.root / ".env"
+            old = destination.read_text(encoding="utf-8") if destination.exists() else ""
+            lines = [
+                line for line in old.splitlines()
+                if not re.match(r"^\\s*(?:export\\s+)?TTS_ACTIVE_MODEL\\s*=", line)
+            ]
+            lines.append("TTS_ACTIVE_MODEL=" + canonical)
+            self.root.mkdir(parents=True, exist_ok=True)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=str(self.root),
+                    prefix=".tts-env-", delete=False
+                ) as fh:
+                    temporary = fh.name
+                    os.chmod(temporary, 0o600)
+                    fh.write("\\n".join(lines) + "\\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(temporary, destination)
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
+
+            self.config["TTS_ACTIVE_MODEL"] = canonical
+            if self._running():
+                self._terminate()
+            started = self._spawn() if not self._disabled else False
+            return {"active_model": canonical, "restarting": started}
 
     def _python(self):
         if os.name == "nt":
