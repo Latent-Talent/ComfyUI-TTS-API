@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from .engine import VoxEngine
 from .storage import VoiceStore
 from .qwen_engine import QwenEngine
-from .comfy_queue import queued_tts
+from .comfy_queue import QueueUnavailable, queued_tts
 from .operations import REQUEST_ID, configure as configure_operations, emit
 from .models import (
     VOX_ID, QWEN_DEFAULT, QWEN_DESIGN, QWEN_MODELS, QWEN_SPEAKERS,
@@ -417,8 +417,11 @@ async def model_download_status():
 async def speech(request: SpeechRequest):
     # Actual ComfyUI output-node job occupies a queue position until the
     # complete audio response is prepared, including FFmpeg conversion.
-    async with queued_tts("speech"):
-        return await _speech_in_queue(request)
+    try:
+        async with queued_tts("speech"):
+            return await _speech_in_queue(request)
+    except QueueUnavailable as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 async def _speech_in_queue(request: SpeechRequest):
@@ -539,8 +542,11 @@ def _design_voice(request: DesignRequest):
 
 @app.post("/api/voices/design", dependencies=[Depends(authenticate)])
 async def design_voice(request: DesignRequest):
-    async with queued_tts("voice_design"):
-        return await _design_voice_in_queue(request)
+    try:
+        async with queued_tts("voice_design"):
+            return await _design_voice_in_queue(request)
+    except QueueUnavailable as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 async def _design_voice_in_queue(request: DesignRequest):
