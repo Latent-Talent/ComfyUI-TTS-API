@@ -11,6 +11,8 @@ sanitized ComfyUI console.
 from __future__ import annotations
 
 import json
+import ctypes
+import signal
 import os
 from pathlib import Path
 import random
@@ -34,6 +36,17 @@ def _send(connection: socket.socket, item: dict) -> None:
 
 
 def main() -> int:
+    # When ComfyUI force-stops the managed TTS API, IndexTTS must not remain
+    # orphaned on the GPU. On Linux/WSL, request SIGTERM when its parent dies.
+    if sys.platform.startswith("linux"):
+        try:
+            libc = ctypes.CDLL(None)
+            libc.prctl(1, signal.SIGTERM, 0, 0, 0)
+        except (AttributeError, OSError):
+            pass
+    expected_parent = int(os.environ.get("TTS_INDEX_PARENT_PID", "0"))
+    if expected_parent and os.getppid() != expected_parent:
+        return 1
     source = Path(os.environ["TTS_INDEX_SOURCE"]).resolve()
     checkpoints = Path(os.environ["TTS_INDEX_CHECKPOINTS"]).resolve()
     socket_path = os.environ["TTS_INDEX_SOCKET"]
