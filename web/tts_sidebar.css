@@ -66,3 +66,12 @@
 .tts-ui audio { width: 100%; border-radius: 9px; }
 .tts-ui .tts-feedback { border: 1px solid var(--tts-border); border-radius: 8px; padding: 10px; line-height: 1.45; background: var(--tts-field); overflow-wrap: anywhere; }
 .tts-ui .tts-feedback.is-error { border-color: #be6c6c; color: #e4a0a0; }
+
+.tts-ui .tts-emotion-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.tts-ui .tts-emotion-grid label {
+  min-width: 0;
+}
