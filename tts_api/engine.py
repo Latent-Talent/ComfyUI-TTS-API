@@ -316,6 +316,9 @@ class VoxEngine:
         """Generate a complete WAV in memory; serializes model operations to avoid CUDA races."""
         if not text.strip():
             raise ValueError("Input text cannot be empty.")
+        # A loaded model cannot be used from a background path outside the
+        # scheduled queue slot, even when no fresh model load is needed.
+        require_queue_reservation()
         with self._lock:
             if self._paused:
                 raise RuntimeError("TTS is paused while ComfyUI needs GPU memory")
