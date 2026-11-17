@@ -141,12 +141,6 @@ function template() {
           <option value="Russian">Russian</option>
         </select></label>
         <label>Character voice<select data-test-voice><option value="default">Default voice</option></select></label>
-        <label data-test-voice-file-row class="tts-audio-picker">Or browse for a character recording
-          <input data-test-voice-file type="file" accept="audio/*,.wav,.flac,.ogg,.mp3,.aiff">
-        </label>
-        <label data-test-voice-consent-row hidden class="tts-check">
-          <input data-test-voice-consent type="checkbox"> I have permission to use this recording
-        </label>
         <label>Text<textarea data-test-text rows="5">Hello! This is a test of my local text to speech server.</textarea></label>
         <label>Delivery instructions (optional)<textarea data-test-delivery rows="2" placeholder="Warm and relaxed"></textarea></label>
         <div class="tts-test-row">
@@ -285,7 +279,7 @@ function mount(container) {
         }
         for (const voice of savedVoices) {
             if (!voice.reference_file) continue;
-            select.add(new Option("Saved · " + (voice.name || voice.id), voice.id));
+            select.add(new Option(voice.name || voice.id, voice.id));
         }
         if (value && !(needsSaved && value === "default") &&
             ![...select.options].some((o) => o.value === value)) {
@@ -403,7 +397,7 @@ function mount(container) {
                 chooser.append(heading, fileInput);
                 const selectLabel = document.createElement("label");
                 selectLabel.className = "tts-audio-saved";
-                selectLabel.textContent = "Saved recordings";
+                // The field label already identifies this choice; avoid a second label.
                 selectLabel.append(control);
                 label.append(selectLabel, chooser, consent, fileNote);
                 fileInput.addEventListener("change", () => {
@@ -605,9 +599,11 @@ function mount(container) {
             emotionReference.value = values.emotion_reference_voice;
         }
         const voice = $("[data-test-voice]");
-        if (values.voice && values.voice !== "default" &&
-            [...voice.options].some((o) => o.value === values.voice)) {
-            voice.value = values.voice;
+        // Test starts with the saved Server-pane default for this model.
+        // Keep the fallback when the configured recording has been removed.
+        const configuredVoice = values.voice || "default";
+        if ([...voice.options].some((o) => o.value === configuredVoice)) {
+            voice.value = configuredVoice;
         }
         updateEmotionControls();
     }
@@ -649,10 +645,6 @@ function mount(container) {
         const qwen = id.startsWith("qwen3-tts");
         const index = id === "indextts-2.5";
         $("[data-index-emotion]").hidden = !index;
-        const isDesign = id.endsWith("-voicedesign");
-        $("[data-test-voice-file-row]").hidden = isDesign;
-        $("[data-test-voice-consent-row]").hidden =
-            isDesign || !$("[data-test-voice-file]").files?.length;
         $("[data-test-steps]").disabled = qwen || index;
         $("[data-test-steps]").title = qwen || index
             ? "This backend does not use VoxCPM inference steps"
@@ -1103,10 +1095,6 @@ function mount(container) {
         }, "Built-in defaults restored for this model."
     ));
     $("[data-index-emo-mode]").addEventListener("change", updateEmotionControls);
-    $("[data-test-voice-file]").addEventListener("change", () => {
-        $("[data-test-voice-consent]").checked = false;
-        updateTestModelNote();
-    });
     $("[data-index-emo-file]").addEventListener("change", () => {
         $("[data-index-emo-file-consent]").checked = false;
         updateEmotionControls();
@@ -1244,18 +1232,6 @@ function mount(container) {
                 }
             }
             if (!body.input.trim()) throw new Error("Enter text to speak.");
-            const mainFile = $("[data-test-voice-file]").files?.[0];
-            if (mainFile && !body.model.endsWith("-voicedesign")) {
-                const voice = await registerAudioFile(
-                    mainFile, $("[data-test-voice-consent]").checked, "character voice"
-                );
-                body.voice = voice.id;
-                $("[data-test-voice-file]").value = "";
-                $("[data-test-voice-consent]").checked = false;
-                await refreshVoices();
-                $("[data-test-voice]").value = voice.id;
-                updateTestModelNote();
-            }
             const emotionFile = $("[data-index-emo-file]").files?.[0];
             if (body.model === "indextts-2.5" && body.emotion_mode === "reference" &&
                 emotionFile) {
