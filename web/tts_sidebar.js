@@ -197,12 +197,19 @@ function mount(container) {
     function updateTestModelNote() {
         const id = $("[data-test-model]").value;
         const note = $("[data-test-model-note]");
+        const qwen = id.startsWith("qwen3-tts");
+        $("[data-test-steps]").disabled = qwen;
+        $("[data-test-steps]").title = qwen
+            ? "Qwen3-TTS does not use VoxCPM inference steps"
+            : "VoxCPM2 inference steps";
         if (id.endsWith("-base")) {
-            note.textContent = "Base clones a saved recording. Select a saved voice; built-in speakers are not available. Steps are VoxCPM-only.";
+            note.textContent = "Base clones saved recordings only. Delivery instructions and VoxCPM steps are not available.";
         } else if (id.endsWith("-voicedesign")) {
             note.textContent = "VoiceDesign uses delivery instructions as a separate voice description. Saved voices use Base automatically.";
         } else if (id.startsWith("qwen3-tts")) {
-            note.textContent = "CustomVoice has nine named speakers. Saved voice recordings use the Qwen Base checkpoint automatically. Steps are VoxCPM-only.";
+            note.textContent = id.includes("0.6b")
+                ? "0.6B CustomVoice: nine built-in speakers. Delivery instructions are not supported; saved voices use Base."
+                : "1.7B CustomVoice: nine built-in speakers with delivery control. Saved voice recordings use Base and cannot take delivery instructions.";
         } else {
             note.textContent = "VoxCPM2: use a saved character voice or default. Voice/delivery style can use a short cached reference.";
         }
@@ -311,6 +318,9 @@ function mount(container) {
             select.add(new Option(voice.name || voice.id, voice.id));
         }
         if ([...select.options].some((option) => option.value === choice)) select.value = choice;
+        if (chosenModel.endsWith("-base") && select.value === "default" && voices.length) {
+            select.value = voices[0].id;
+        }
     }
 
     async function perform(button, operation, success) {
