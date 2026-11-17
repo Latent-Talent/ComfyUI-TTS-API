@@ -20,7 +20,7 @@ import soundfile as sf
 
 from .operations import emit
 from .comfy_queue import active_request_kind, require_queue_reservation
-from .memory import release_unused_cuda
+from .memory import is_memory_exhaustion, release_unused_cuda
 
 LOG = logging.getLogger("comfyui-tts-api.engine")
 
@@ -393,8 +393,11 @@ class VoxEngine:
                                    "message": str(exc)[:1000]}
                 emit("generation.failed", backend="voxcpm2",
                      error_type=type(exc).__name__)
+                if is_memory_exhaustion(exc):
+                    # Don't retain a checkpoint after CUDA allocation failure.
+                    self._unload_locked()
                 raise
             finally:
                 self._last_activity = time.monotonic()
-                if self.unload_after_request and self._retain_model_depth == 0:
+                if self.unload_after_request and self._retain_model_depth == 0 and self.loaded:
                     self._unload_locked()
