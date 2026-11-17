@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI):
         emit("service.stopped", reason="shutdown")
 
 
-app = FastAPI(title="ComfyUI TTS API", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="ComfyUI TTS API", version="0.6.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def operation_request_logging(request, call_next):
