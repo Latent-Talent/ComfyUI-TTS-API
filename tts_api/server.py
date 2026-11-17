@@ -19,7 +19,7 @@ from typing import Literal
 import anyio
 import soundfile as sf
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from .engine import VoxEngine
@@ -648,6 +648,30 @@ async def _speech_in_queue(request: SpeechRequest):
                     headers={"Cache-Control": "no-store"})
 
 
+def _decode_voice_reference(raw: bytes) -> bytes:
+    """Validate and normalize reference audio, regardless of extension.
+
+    Processing happens off the API event loop. Generated WAV is PCM-16 so
+    replacing a voice cannot switch its reference format unexpectedly.
+    """
+    try:
+        import numpy as np
+        with sf.SoundFile(io.BytesIO(raw)) as audio:
+            if not (8000 <= audio.samplerate <= 192000 and
+                    1 <= audio.channels <= 2 and
+                    0.3 <= audio.frames / audio.samplerate <= 120):
+                raise ValueError("Reference must be mono/stereo, 0.3–120 seconds, 8–192 kHz")
+            signal = audio.read(dtype="float32", always_2d=False)
+            sample_rate = audio.samplerate
+        if not np.isfinite(signal).all():
+            raise ValueError("Reference contains invalid audio samples")
+        output = io.BytesIO()
+        sf.write(output, signal, sample_rate, format="WAV", subtype="PCM_16")
+        return output.getvalue()
+    except (ValueError, OSError, RuntimeError, TypeError) as exc:
+        raise HTTPException(422, "Unsupported or invalid reference audio") from None
+
+
 @app.post("/api/voices/clone", dependencies=[Depends(authenticate)])
 async def clone_voice(name: str = Form(...), reference_text: str = Form(""),
                       consent: bool = Form(False), audio: UploadFile = File(...)):
@@ -660,18 +684,7 @@ async def clone_voice(name: str = Form(...), reference_text: str = Form(""),
     raw = await audio.read(MAX_UPLOAD + 1)
     if len(raw) > MAX_UPLOAD:
         raise HTTPException(413, "Audio exceeds configured upload limit")
-    # Decode and re-encode to WAV to avoid trusting extensions or opaque files.
-    try:
-        signal, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=False)
-        if signal.ndim not in (1, 2) or not 8000 <= sr <= 192000:
-            raise ValueError("Unsupported audio")
-        if len(signal) / sr > 120 or len(signal) / sr < 0.3:
-            raise ValueError("Reference must be between 0.3 and 120 seconds")
-        output = io.BytesIO()
-        sf.write(output, signal, sr, format="WAV", subtype="PCM_16")
-        encoded = output.getvalue()
-    except Exception as exc:
-        raise HTTPException(422, f"Invalid reference audio: {exc}") from exc
+    encoded = await anyio.to_thread.run_sync(_decode_voice_reference, raw)
     record = STORE.create(name=name, reference=encoded, reference_text=reference_text)
     emit("voice.clone.saved", kind="voice_clone", audio_bytes=len(encoded))
     return record
@@ -743,6 +756,75 @@ async def _design_voice_in_queue(request: DesignRequest):
 @app.get("/api/voices", dependencies=[Depends(authenticate)])
 async def list_voices():
     return STORE.list()
+
+
+@app.get("/api/voices/{voice_id}", dependencies=[Depends(authenticate)])
+async def get_voice(voice_id: str):
+    try:
+        voice = STORE.get(voice_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    if voice is None:
+        raise HTTPException(404, "Unknown voice ID")
+    return voice
+
+
+@app.get("/api/voices/{voice_id}/audio", dependencies=[Depends(authenticate)])
+async def get_voice_audio(voice_id: str):
+    try:
+        record = STORE.get(voice_id)
+        if record is None:
+            raise HTTPException(404, "Unknown voice ID")
+        path = STORE.audio_path(record)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except FileNotFoundError:
+        raise HTTPException(404, "Voice reference recording is missing") from None
+    if path is None:
+        raise HTTPException(404, "This voice has no reference audio")
+    return FileResponse(path, media_type="audio/wav",
+                        headers={"Cache-Control": "no-store",
+                                 "X-Content-Type-Options": "nosniff"})
+
+
+@app.patch("/api/voices/{voice_id}", dependencies=[Depends(authenticate)])
+async def update_voice(
+    voice_id: str, name: str = Form(...), description: str = Form(""),
+    reference_text: str = Form(""), consent: bool = Form(False),
+    audio: UploadFile | None = File(default=None),
+):
+    """Edit a saved voice without changing its ID or existing API references."""
+    name = name.strip()
+    if not (1 <= len(name) <= 120):
+        raise HTTPException(422, "Voice name must contain 1–120 characters")
+    if len(description) > 1000 or len(reference_text) > 4000:
+        raise HTTPException(422, "Description or transcript exceeds allowed length")
+    try:
+        if STORE.get(voice_id) is None:
+            raise HTTPException(404, "Unknown voice ID")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    replacement = None
+    if audio is not None and audio.filename:
+        if not consent:
+            raise HTTPException(422, "Voice recording permission must be confirmed")
+        raw = await audio.read(MAX_UPLOAD + 1)
+        if len(raw) > MAX_UPLOAD:
+            raise HTTPException(413, "Audio exceeds configured upload limit")
+        replacement = await anyio.to_thread.run_sync(_decode_voice_reference, raw)
+    try:
+        record = await anyio.to_thread.run_sync(
+            lambda: STORE.update(
+                voice_id, name=name, description=description,
+                reference_text=reference_text, reference=replacement,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    if record is None:
+        raise HTTPException(404, "Unknown voice ID")
+    emit("voice.updated", audio_replaced=replacement is not None)
+    return record
 
 
 @app.delete("/api/voices/{voice_id}", dependencies=[Depends(authenticate)])
