@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, web
@@ -98,6 +99,8 @@ async def status(_request: web.Request) -> web.Response:
         "reserved": _MANAGER._reserved,
         "api_url": _MANAGER.url,
         "port": _MANAGER.port,
+        "active_model_editable": "TTS_ACTIVE_MODEL" not in os.environ,
+        "active_model": _MANAGER.config.get("TTS_ACTIVE_MODEL", "voxcpm2"),
         "api_key": {
             "configured": _MANAGER.api_key_configured,
             "editable": _MANAGER.api_key_editable,
@@ -117,6 +120,47 @@ async def status(_request: web.Request) -> web.Response:
                             result["health"] = data
         except (ClientError, asyncio.TimeoutError, OSError, ValueError):
             pass
+    return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+
+async def models(_request: web.Request) -> web.Response:
+    return await _forward("GET", "/api/models")
+
+
+async def model_download_status(_request: web.Request) -> web.Response:
+    return await _forward("GET", "/api/models/download/status")
+
+
+async def download_model(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Expected JSON object")
+    except (ValueError, TypeError):
+        return _error(400, "Invalid download request")
+    return await _forward("POST", "/api/models/download", payload=payload)
+
+
+async def select_model(request: web.Request) -> web.Response:
+    origin = request.headers.get("Origin")
+    if origin and urlsplit(origin).netloc != request.host:
+        return _error(403, "Model settings must originate from the ComfyUI page")
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Expected JSON object")
+        result = await asyncio.to_thread(
+            _MANAGER.configure_active_model, payload.get("model_id")
+        )
+    except (ValueError, TypeError) as exc:
+        return _error(422, str(exc))
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    except RuntimeError as exc:
+        return _error(409, str(exc))
+    except OSError:
+        LOG.exception("[TTS API] Unable to persist model selection")
+        return _error(500, "Unable to persist model selection")
     return web.json_response(result, headers={"Cache-Control": "no-store"})
 
 
@@ -234,6 +278,10 @@ def register_routes():
     from server import PromptServer
     routes = PromptServer.instance.routes
     routes.get(BASE + "/status")(status)
+    routes.get(BASE + "/models")(models)
+    routes.post(BASE + "/models/download")(download_model)
+    routes.get(BASE + "/models/download/status")(model_download_status)
+    routes.post(BASE + "/settings/model")(select_model)
     routes.get(BASE + "/voices")(voices)
     routes.post(BASE + "/voices/design")(design)
     routes.post(BASE + "/voices/clone")(clone)
