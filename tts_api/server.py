@@ -249,10 +249,9 @@ def _render(request: SpeechRequest) -> bytes:
                     raise ValueError("Select a saved emotion-reference voice")
                 emo_ref = str(STORE.audio_path(ref_voice))
             mode = request.emotion_mode
-            # Existing clients send free-form "instructions" for emotion.
-            # Treat these as an explicit description rather than ignoring them.
-            if mode == "neutral" and request.instructions.strip():
-                mode = "text"
+            # The explicit emotion mode controls whether the description is
+            # used. In particular, returning to Neutral must not silently
+            # reuse a previously saved, now-hidden emotion description.
             result = INDEX_ENGINE.generate(
                 request.input, reference_path=ref, language=request.language,
                 instructions=request.instructions, emotion_mode=mode,
