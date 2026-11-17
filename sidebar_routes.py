@@ -19,7 +19,7 @@ from .queue_bridge import BROKER
 
 LOG = logging.getLogger("comfyui-tts-api")
 BASE = "/tts-api"
-REQUEST_TIMEOUT = ClientTimeout(total=600, connect=8)
+REQUEST_TIMEOUT = ClientTimeout(total=1950, connect=8)
 
 
 def _headers() -> dict[str, str]:
@@ -141,6 +141,9 @@ async def queue_acquire(request: web.Request) -> web.Response:
         if not isinstance(data, dict):
             raise ValueError("Invalid queue request")
         from server import PromptServer
+        from nodes import NODE_CLASS_MAPPINGS
+        if "LatentTalentTTSQueueSlot" not in NODE_CLASS_MAPPINGS:
+            raise RuntimeError("TTS queue reservation node is not registered")
         prompt_id = BROKER.create(
             data.get("ticket"), PromptServer.instance,
             data.get("kind", "speech"),
