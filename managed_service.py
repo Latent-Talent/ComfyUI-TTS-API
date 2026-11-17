@@ -379,10 +379,17 @@ class ManagedTTS:
             if last_line < 0:
                 return
             self._event_offset += last_line + 1
-            from .tts_api.operations import (
-                EVENTS, ID_PATTERN, VALID_STRINGS,
-                INT_FIELDS, FLOAT_FIELDS, BOOL_FIELDS,
-            )
+            try:
+                from .tts_api import operations as activity
+            except ImportError:
+                # Tests/standalone use managed_service as a top-level module.
+                from tts_api import operations as activity
+            EVENTS = activity.EVENTS
+            ID_PATTERN = activity.ID_PATTERN
+            VALID_STRINGS = activity.VALID_STRINGS
+            INT_FIELDS = activity.INT_FIELDS
+            FLOAT_FIELDS = activity.FLOAT_FIELDS
+            BOOL_FIELDS = activity.BOOL_FIELDS
             for line in chunk[:last_line + 1].splitlines():
                 try:
                     record = json.loads(line)
