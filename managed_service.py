@@ -473,7 +473,6 @@ class ManagedTTS:
                 except ImportError:
                     from queue_bridge import BROKER
                 tts_active = BROKER.active()
-                tts_queued = BROKER.outstanding()
                 # Pending workflows are not using the GPU; their submission
                 # already triggered one cache-reclaim attempt via on_prompt.
                 # Do not repeatedly pause an idle API while they sit queued.
