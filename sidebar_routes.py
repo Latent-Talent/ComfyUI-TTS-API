@@ -175,7 +175,10 @@ async def queue_release(request: web.Request) -> web.Response:
         ticket = data.get("ticket")
         if not isinstance(ticket, str):
             raise ValueError("Invalid queue request")
-        released = BROKER.release(ticket)
+        status = data.get("status", "completed")
+        if status not in ("completed", "failed"):
+            raise ValueError("Invalid TTS queue result")
+        released = BROKER.release(ticket, status=status)
     except (ValueError, TypeError):
         return _error(422, "Invalid queue request")
     return web.json_response({"released": released})
