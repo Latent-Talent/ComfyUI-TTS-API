@@ -80,7 +80,8 @@ def test_queue_item_is_real_and_contains_no_speech_content():
     assert item[2]["1"]["class_type"] == "LatentTalentTTSQueueSlot"
     assert item[4] == ["1"]
     assert len(item) == 6
-    assert "input" not in str(item)
+    assert set(item[2]["1"]["inputs"]) == {"ticket"}
+    assert item[2]["1"]["inputs"]["ticket"] == ticket
     assert "reference_text" not in str(item)
     assert broker.state(ticket, srv.prompt_queue) == "pending"
     assert broker.outstanding()
