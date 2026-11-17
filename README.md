@@ -1,14 +1,14 @@
 # ComfyUI TTS API
 
-A **sidebar-managed, local text-to-speech API server** for ComfyUI, with an OpenAI-compatible endpoint for SillyTavern and other clients. Includes VoxCPM2 voice cloning and voice-by-description.
+A **sidebar-managed, local text-to-speech API server** for ComfyUI, with an OpenAI-compatible endpoint for SillyTavern and other clients. Supports **VoxCPM2 and Qwen3-TTS** voice design, cloning and named speakers.
 
-**v0.3 — API + sidebar only. No ComfyUI workflow nodes.** ComfyUI starts the service and manages its GPU memory; voice generation is accessed through the sidebar or HTTP API. This project does not filter, censor, rewrite, or send user text to a moderation service. Model output fidelity is not guaranteed by removing application-side filters.
+**v0.5 — VoxCPM2 + Qwen3-TTS; API + sidebar only. No ComfyUI workflow nodes.** ComfyUI starts the service and manages its GPU memory; voice generation is accessed through the sidebar or HTTP API. This project does not filter, censor, rewrite, or send user text to a moderation service. Model output fidelity is not guaranteed by removing application-side filters.
 
 ## Highlights
 
 - Dedicated **TTS API** tab in the native ComfyUI sidebar: status, model memory, restart/unload, character voice library, voice design and clone, and a built-in speech test/audio player.
 - A managed local speech API starts automatically when ComfyUI starts, and exits when ComfyUI exits. **No separate `start.sh` needed.**
-- VoxCPM2 loads lazily, stays resident between requests, and unloads after 60 seconds idle (configurable).
+- VoxCPM2 and Qwen3-TTS models load lazily, stay resident between requests, and unload after 60 seconds idle (configurable). Switching model families releases the previous model first.
 - When ComfyUI starts an image/video workflow, its prompt handler asks TTS to release VRAM. If the TTS worker cannot yield promptly, ComfyUI terminates its **own managed TTS worker** to free VRAM, interrupting that active TTS request. The service returns after the ComfyUI queue is idle.
 - ComfyUI-specific sidebar API requests are proxied through the ComfyUI HTTP server; browser clients do not need access to the internal API key or a separate TTS URL.
 - The standalone OpenAI-style speech endpoint provides MP3 by default, WAV, Opus/Ogg, AAC, FLAC, and 24 kHz signed 16-bit PCM.
@@ -16,7 +16,7 @@ A **sidebar-managed, local text-to-speech API server** for ComfyUI, with an Open
 - The TTS runtime uses an **isolated Python virtual environment**, leaving the existing ComfyUI Python/Torch/CUDA packages untouched.
 - No cloud account required. Only model weights are downloaded on first use.
 
-**Important:** v0.3 uses the official VoxCPM2 native Python backend. Native 4090 inference, pause/unload integration, and SillyTavern compatibility still require machine-level verification. vLLM-Omni/Nano-vLLM acceleration, Qwen3-TTS, and true streaming audio remain planned, not yet implemented.
+**Important:** The engines use the official native Python packages. Qwen3-TTS GPU inference still needs machine-level verification on the target RTX 4090. vLLM-Omni/Nano-vLLM acceleration and true streaming audio are not implemented.
 
 ## Install or update (WSL / Ubuntu)
 
@@ -44,6 +44,43 @@ The installer creates `ComfyUI-TTS-API/.venv` and installs the service. This is 
 The API process starts automatically when ComfyUI loads the extension. The **GPU model** is only loaded on the first speech/design request.
 
 If the sidebar doesn't appear after restart, hard-refresh the ComfyUI browser tab (`Ctrl+Shift+R`). Confirm the extension is enabled and ComfyUI's startup log has no TTS API errors.
+
+### Install and use Qwen3-TTS (optional)
+
+The existing **VoxCPM2 installation stays intact and is still the default**. To enable Qwen's official Python backend, install it once into the *isolated TTS API* virtual environment:
+
+```bash
+cd ~/ComfyUI/custom_nodes/ComfyUI-TTS-API
+git pull --ff-only
+bash install-qwen.sh
+```
+
+This does **not** alter your system Python or ComfyUI's `~/ComfyUI/.venv`. It installs `qwen-tts` and its dependencies only in `ComfyUI-TTS-API/.venv`. It may update shared dependencies used by VoxCPM2 within that isolated TTS environment; the installer runs `pip check` and verifies importability. It does not download model weights during install.
+
+Restart ComfyUI once after updating the custom node, and use the **TTS API → Server → Speech model** controls:
+
+1. Select a supported Qwen model.
+2. Optionally click **Download Qwen weights** to cache weights in the normal Hugging Face cache (no GPU load). The sidebar shows download state; the worker log contains detailed transfer progress. Alternatively, the first generation auto-downloads missing model weights.
+3. Click **Make API default** if you want SillyTavern's `tts-1` requests to use that model. This saves `TTS_ACTIVE_MODEL` in `.env` and restarts **only the TTS service**, preserving ComfyUI and the API key.
+4. Under **Test**, select the backend and use a speaker or saved voice. The selected backend can be tested without changing the global default.
+
+Supported Qwen checkpoints:
+
+| Backend model ID | Features |
+| --- | --- |
+| `qwen3-tts-1.7b-customvoice` | 9 named speakers; native instructions and multilingual synthesis |
+| `qwen3-tts-0.6b-customvoice` | 9 named speakers; no native instruction control in the 0.6B model |
+| `qwen3-tts-1.7b-voicedesign` | Native voice descriptions and delivery instructions, spoken text separate |
+| `qwen3-tts-1.7b-base` | Cloning with a saved reference recording and optional transcript |
+| `qwen3-tts-0.6b-base` | Smaller cloning checkpoint with a saved reference |
+ 
+**Qwen built-in speakers:** Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, and Sohee. The default OpenAI voice names such as `alloy` map to Ryan when Qwen CustomVoice is selected; distinct characters can use these actual named speakers.
+
+**Saved voices work across engines:** Voice Design with Qwen uses its dedicated VoiceDesign model and stores the generated sample as an ordinary persistent `voice_...` recording. When you use that saved voice with Qwen CustomVoice, the server automatically switches to the matching **Base** model for cloning (with a 0.6B Base when a 0.6B model was selected). If the active model is Base and no saved voice is chosen, the API returns an explicit 422 instead of inventing a reference.
+
+Qwen model weights are saved in the default Hugging Face cache, normally `~/.cache/huggingface/hub`. The TTS server keeps at most one active inference model in GPU memory. Downloading a Qwen checkpoint does not preload it in VRAM; selecting a different checkpoint releases the old one before loading the replacement.
+
+**Current limitation:** The Qwen3-TTS Python backend generates full audio before responding. A cold model switch or first-time model download will add latency. Native Qwen voice design and instruction control are distinct from the VoxCPM2 two-pass approximation.
 
 ### API key setup from the sidebar
 
@@ -76,7 +113,7 @@ Set the TTS provider to **OpenAI Compatible**, model `voxcpm2` (recommended) or 
 
 `http://127.0.0.1:8025/v1/audio/speech`
 
-**Compatibility aliases:** The model IDs `tts-1`, `tts-1-hd`, `tts-1-1106`, `tts-1-hd-1106`, and `gpt-4o-mini-tts` all invoke the same local **VoxCPM2** backend. They do *not* run an OpenAI model or enable different quality modes. OpenAI default speaker names (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`, etc.) map to the single local default voice; for distinct character voices, create voices in the sidebar and use their persistent `voice_...` IDs. Unknown model names still return 422, and unknown custom voice IDs return 404.
+**Compatibility aliases:** The model IDs `tts-1`, `tts-1-hd`, `tts-1-1106`, `tts-1-hd-1106`, and `gpt-4o-mini-tts` invoke whichever backend is configured in `TTS_ACTIVE_MODEL` (VoxCPM2 by default). They do *not* run an OpenAI model or enable different quality modes. OpenAI default speaker names (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`, etc.) map to the single local default voice; for distinct character voices, create voices in the sidebar and use their persistent `voice_...` IDs. Unknown model names still return 422, and unknown custom voice IDs return 404.
 
 ### Saved voices in SillyTavern
 
@@ -134,7 +171,7 @@ Sample speech request:
 }
 ```
 
-The server buffers completed speech audio before responding. True audio streaming/low first-packet latency are future work.
+The server buffers completed speech audio before responding. For Qwen, `language` can be set to `Auto`, `English`, `Chinese`, and other supported languages. `seed` is applied to the worker's Torch RNG; `steps` and `cfg` are VoxCPM-only parameters. True audio streaming/low first-packet latency are future work.
 
 ## GPU coordination and configuration
 
@@ -184,4 +221,4 @@ The first speech request downloads model weights; failures involving Torch/CUDA 
 
 GitHub CI covers Python syntax, mocked speech API calls, model pause and idle-unload contracts, and browser script syntax. It does **not** run full GPU inference. The sidebar is registered using ComfyUI's supported `registerSidebarTab` extension API with `WEB_DIRECTORY`. The project intentionally declares empty node mappings.
 
-**Planned:** accelerated inference (vLLM-Omni/Nano-vLLM), Qwen3-TTS backend, cached voice conditioning, audio chunk streaming, and better GPU arbitration with long ComfyUI workloads.
+**Planned:** accelerated inference (vLLM-Omni/Nano-vLLM), audio chunk streaming, and better GPU arbitration with long ComfyUI workloads.
