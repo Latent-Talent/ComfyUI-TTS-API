@@ -60,6 +60,7 @@ async def _reap_idle_model():
             os._exit(0)
         if IDLE_SECONDS:
             await anyio.to_thread.run_sync(ENGINE.unload_if_idle, IDLE_SECONDS)
+            await anyio.to_thread.run_sync(QWEN_ENGINE.unload_if_idle, IDLE_SECONDS)
 
 
 @asynccontextmanager
@@ -74,9 +75,10 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         await anyio.to_thread.run_sync(ENGINE.unload)
+        await anyio.to_thread.run_sync(QWEN_ENGINE.unload)
 
 
-app = FastAPI(title="ComfyUI TTS API", version="0.4.1", lifespan=lifespan)
+app = FastAPI(title="ComfyUI TTS API", version="0.5.0", lifespan=lifespan)
 
 
 async def authenticate(authorization: str | None = Header(default=None),
@@ -195,14 +197,27 @@ def _render(request: SpeechRequest) -> bytes:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "service": "comfyui-tts-api", "model": MODEL,
-            "cuda_allocator": os.environ.get("PYTORCH_ALLOC_CONF", os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "backend:native")),
-            "version": app.version, "loaded": ENGINE.loaded, "paused": ENGINE.paused,
-            "compile_enabled": ENGINE.optimize,
-            "compile_fallback_used": ENGINE.compile_fallback_used,
-            "last_error": ENGINE.last_error,
-            "idle_unload_seconds": IDLE_SECONDS, "last_stats": ENGINE.last_stats,
-            "voice_count": len(STORE.list())}
+    qwen_running = QWEN_ENGINE.loaded
+    return {
+        "ok": True, "service": "comfyui-tts-api", "version": app.version,
+        "model": ACTIVE_MODEL, "active_model": ACTIVE_MODEL,
+        "loaded_model": QWEN_ENGINE.loaded_model if qwen_running else (VOX_ID if ENGINE.loaded else None),
+        "voxcpm_checkpoint": MODEL,
+        "qwen_installed": importlib.util.find_spec("qwen_tts") is not None,
+        "qwen_loaded": qwen_running,
+        "cuda_allocator": os.environ.get(
+            "PYTORCH_ALLOC_CONF",
+            os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "backend:native"),
+        ),
+        "loaded": ENGINE.loaded or qwen_running,
+        "paused": ENGINE.paused or QWEN_ENGINE.paused,
+        "compile_enabled": ENGINE.optimize,
+        "compile_fallback_used": ENGINE.compile_fallback_used,
+        "last_error": QWEN_ENGINE.last_error if qwen_running else ENGINE.last_error,
+        "idle_unload_seconds": IDLE_SECONDS,
+        "last_stats": QWEN_ENGINE.last_stats if qwen_running else ENGINE.last_stats,
+        "voice_count": len(STORE.list()),
+    }
 
 
 def _authorize_control(value: str | None):
@@ -210,35 +225,71 @@ def _authorize_control(value: str | None):
         raise HTTPException(403, "Control operations require an internal token")
 
 
+def _pause_both() -> bool:
+    vox_ok = ENGINE.try_pause()
+    qwen_ok = QWEN_ENGINE.try_pause()
+    return vox_ok and qwen_ok
+
+
+def _resume_both():
+    ENGINE.resume()
+    QWEN_ENGINE.resume()
+
+
+def _unload_both():
+    with INFERENCE_LOCK:
+        ENGINE.unload()
+        QWEN_ENGINE.unload()
+
+
 @app.post("/api/internal/pause", include_in_schema=False)
 async def internal_pause(x_tts_control_token: str | None = Header(default=None)):
     _authorize_control(x_tts_control_token)
-    if not await anyio.to_thread.run_sync(ENGINE.try_pause):
+    if not await anyio.to_thread.run_sync(_pause_both):
         raise HTTPException(409, "TTS is currently generating audio")
-    return {"paused": True, "loaded": ENGINE.loaded}
+    return {"paused": True, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded}
 
 
 @app.post("/api/internal/resume", include_in_schema=False)
 async def internal_resume(x_tts_control_token: str | None = Header(default=None)):
     _authorize_control(x_tts_control_token)
-    await anyio.to_thread.run_sync(ENGINE.resume)
-    return {"paused": False, "loaded": ENGINE.loaded}
+    await anyio.to_thread.run_sync(_resume_both)
+    return {"paused": False, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded}
 
 
 @app.get("/v1/models", dependencies=[Depends(authenticate)])
 async def models():
     return {"object": "list", "data": [
-        {"id": "voxcpm2", "object": "model", "owned_by": "local"},
-        *[{"id": alias, "object": "model", "owned_by": "local-voxcpm2-alias"}
+        {"id": VOX_ID, "object": "model", "owned_by": "local"},
+        *[{"id": name, "object": "model", "owned_by": "local-qwen3-tts"}
+          for name in QWEN_MODELS],
+        *[{"id": alias, "object": "model",
+           "owned_by": "local-active-backend-alias"}
           for alias in sorted(OPENAI_MODEL_ALIASES)],
     ]}
 
 
 @app.get("/v1/audio/voices", dependencies=[Depends(authenticate)])
 async def voices():
-    return {"voices": [{"id": "default", "name": "Default"}] +
-            [{"id": v["id"], "name": v["name"], "description": v.get("description", "")}
-             for v in STORE.list()]}
+    return {"voices": [
+        {"id": "default", "name": "Default"},
+        *[{"id": name, "name": name, "source": "qwen-customvoice"}
+          for name in QWEN_SPEAKERS],
+        *[{"id": v["id"], "name": v["name"],
+           "description": v.get("description", ""), "source": "saved"}
+          for v in STORE.list()],
+    ]}
+
+
+@app.get("/api/models", dependencies=[Depends(authenticate)])
+async def list_models():
+    return {
+        "active_model": ACTIVE_MODEL,
+        "models": model_catalog(),
+        "qwen_installed": importlib.util.find_spec("qwen_tts") is not None,
+        "loaded_model": QWEN_ENGINE.loaded_model if QWEN_ENGINE.loaded
+                        else (VOX_ID if ENGINE.loaded else None),
+    }
 
 
 @app.post("/v1/audio/speech", dependencies=[Depends(authenticate)])
@@ -254,20 +305,19 @@ async def speech(request: SpeechRequest):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
-        # Third-party TTS backends may raise AssertionError, TypeError,
-        # ValueError, CUDA exceptions, or custom compiler exceptions. Do not
-        # turn them into an opaque HTTP 500 that says only "Internal Server Error".
-        LOG.exception("[TTS API] Unhandled speech error")
-        if ENGINE.last_error is None:
-            ENGINE.last_error = {"stage": "speech_api", "type": type(exc).__name__,
-                                 "message": str(exc)[:1000]}
+        LOG.exception("[TTS API] Speech error")
+        resolved = canonical_model(request.model, ACTIVE_MODEL, MODEL)
+        engine = QWEN_ENGINE if is_qwen(resolved) else ENGINE
+        if engine.last_error is None:
+            engine.last_error = {"stage": "speech_api",
+                                 "type": type(exc).__name__, "message": str(exc)[:1000]}
         message = str(exc).strip()[:1000] or "No error message supplied"
         raise HTTPException(503, detail={
             "error": "Speech generation failed",
             "exception": type(exc).__name__,
             "message": message,
-            "stage": ENGINE.last_error.get("stage", "unknown"),
-            "compile_enabled": ENGINE.optimize,
+            "stage": engine.last_error.get("stage", "unknown"),
+            "model": resolved,
         }) from exc
     if request.response_format == "wav" and request.speed == 1.0:
         return Response(content=audio, media_type="audio/wav",
@@ -333,17 +383,36 @@ async def clone_voice(name: str = Form(...), reference_text: str = Form(""),
     return STORE.create(name=name, reference=encoded, reference_text=reference_text)
 
 
+def _design_voice(request: DesignRequest):
+    selected = canonical_model(request.model, ACTIVE_MODEL, MODEL)
+    with INFERENCE_LOCK:
+        if is_qwen(selected):
+            # VoiceDesign is a dedicated checkpoint. The resulting reference
+            # is stored as an ordinary persistent voice and cloned by Base.
+            if ENGINE.loaded:
+                ENGINE.unload()
+            return QWEN_ENGINE.generate(
+                QWEN_DESIGN, request.sample_text, instructions=request.description,
+                language=request.language, seed=request.seed,
+            )
+        if QWEN_ENGINE.loaded:
+            QWEN_ENGINE.unload()
+        return ENGINE.design_voice(
+            request.sample_text, request.description, request.seed
+        )
+
+
 @app.post("/api/voices/design", dependencies=[Depends(authenticate)])
 async def design_voice(request: DesignRequest):
     try:
-        audio = await anyio.to_thread.run_sync(
-            ENGINE.design_voice, request.sample_text,
-            request.description, request.seed
-        )
+        audio = await anyio.to_thread.run_sync(_design_voice, request)
     except Exception as exc:
+        LOG.exception("[TTS API] Voice design error")
         raise HTTPException(503, f"Voice design failed: {exc}") from exc
-    return STORE.create(name=request.name, description=request.description,
-                        reference=audio, reference_text=request.sample_text)
+    return STORE.create(
+        name=request.name, description=request.description,
+        reference=audio, reference_text=request.sample_text,
+    )
 
 
 @app.get("/api/voices", dependencies=[Depends(authenticate)])
@@ -364,5 +433,5 @@ async def delete_voice(voice_id: str):
 
 @app.post("/api/model/unload", dependencies=[Depends(authenticate)])
 async def unload_model():
-    await anyio.to_thread.run_sync(ENGINE.unload)
+    await anyio.to_thread.run_sync(_unload_both)
     return {"loaded": False}
