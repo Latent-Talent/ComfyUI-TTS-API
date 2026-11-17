@@ -280,7 +280,8 @@ function mount(container) {
             if (!voice.reference_file) continue;
             select.add(new Option("Saved · " + (voice.name || voice.id), voice.id));
         }
-        if (value && ![...select.options].some((o) => o.value === value)) {
+        if (value && !(needsSaved && value === "default") &&
+            ![...select.options].some((o) => o.value === value)) {
             // Retain manually entered values or a deleted recording so the
             // user can correct them rather than silently substituting a voice.
             select.add(new Option("Unavailable · " + value, value));
@@ -492,14 +493,24 @@ function mount(container) {
     async function uploadPendingDefaultAudio(payload) {
         const modelId = payload.model_id;
         const profile = defaultsByModel[modelId];
-        // Do not upload hidden reference-audio fields from an inactive mode.
+        // Validate every selected recording before uploading any of them,
+        // avoiding a partial saved-voice creation if another file lacks consent.
+        const uploads = [];
         for (const spec of profile.fields.filter((f) => f.kind === "audio_voice")) {
             const key = audioKey(modelId, spec.name);
             const pending = pendingAudio.get(key);
-            if (!pending) continue;
             const row = $("[data-model-defaults-fields]")
                 .querySelector('[data-default-row="' + spec.name + '"]');
-            if (row?.hidden) continue;
+            if (!pending || row?.hidden) continue;
+            if (!pending.consent) {
+                throw new Error("Confirm permission to use " + spec.label + ".");
+            }
+            if (!pending.file.size || pending.file.size > 20 * 1024 * 1024) {
+                throw new Error("Choose a valid audio file under 20 MB for " + spec.label + ".");
+            }
+            uploads.push({key, spec, pending});
+        }
+        for (const {key, spec, pending} of uploads) {
             const voice = await registerAudioFile(
                 pending.file, pending.consent, spec.label
             );
@@ -536,6 +547,20 @@ function mount(container) {
                 }
             } else {
                 values[spec.name] = input.value;
+            }
+        }
+        if (modelId === "indextts-2.5") {
+            const queuedAudio = (name) => pendingAudio.has(audioKey(modelId, name));
+            if (!values.voice && !queuedAudio("voice")) {
+                throw new Error("IndexTTS requires a saved voice or selected audio file.");
+            }
+            if (values.emotion_mode === "text" && !values.instructions.trim()) {
+                throw new Error("Enter an emotion description for Text mode.");
+            }
+            if (values.emotion_mode === "reference" &&
+                !values.emotion_reference_voice &&
+                !queuedAudio("emotion_reference_voice")) {
+                throw new Error("Select saved emotion audio or browse for an audio file.");
             }
         }
         return {model_id: modelId, settings: values};
