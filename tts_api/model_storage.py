@@ -91,22 +91,37 @@ def has_weight_files(checkpoint_dir: Path) -> bool:
 
 
 def index_weights_downloaded() -> bool:
-    """IndexTTS requires its config and actual GPT checkpoint, not just config."""
-    import re
-
+    """Verify the local IndexTTS files required by its official initializer."""
     folder = index_checkpoints()
     config = folder / "config.yaml"
     if not config.is_file():
         return False
     try:
-        contents = config.read_text(encoding="utf-8")
-        match = re.search(r"(?m)^\s*gpt_checkpoint:\s*['\"]?([^'\\"\s#]+)", contents)
-        if not match:
+        options = {}
+        for line in config.read_text(encoding="utf-8").splitlines():
+            if ":" in line and not line.lstrip().startswith("#"):
+                key, value = line.split(":", 1)
+                key = key.strip()
+                if key in ("gpt_checkpoint", "s2mel_checkpoint",
+                           "w2v_stat", "qwen_emo_path"):
+                    options[key] = value.split("#", 1)[0].strip().strip("'\"")
+        for field in ("gpt_checkpoint", "s2mel_checkpoint", "w2v_stat"):
+            if not options.get(field):
+                return False
+            candidate = (folder / options[field]).resolve()
+            if (not candidate.is_relative_to(folder.resolve()) or
+                    not candidate.is_file() or candidate.stat().st_size == 0):
+                return False
+        codec = folder / "codec.pth"
+        if not codec.is_file() or codec.stat().st_size == 0:
             return False
-        checkpoint = (folder / match.group(1)).resolve()
-        if not checkpoint.is_relative_to(folder.resolve()):
-            return False
-        return checkpoint.is_file() and checkpoint.stat().st_size > 0
+        # Automatic emotion analysis uses the bundled QwenEmotion checkpoint.
+        emotion_dir = options.get("qwen_emo_path")
+        if emotion_dir:
+            candidate = (folder / emotion_dir).resolve()
+            if not candidate.is_relative_to(folder.resolve()) or not candidate.is_dir():
+                return False
+        return True
     except (OSError, ValueError):
         return False
 
