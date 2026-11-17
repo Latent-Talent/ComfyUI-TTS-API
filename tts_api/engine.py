@@ -18,6 +18,8 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 
+from .operations import emit
+
 LOG = logging.getLogger("comfyui-tts-api.engine")
 
 # These failure patterns point to compiled kernels/graph capture rather than
@@ -54,6 +56,7 @@ class VoxEngine:
         return self._paused
 
     def _unload_locked(self) -> None:
+        previously_loaded = self._model is not None
         model = self._model
         self._model = None
         del model
@@ -64,6 +67,8 @@ class VoxEngine:
         if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
         self._last_activity = time.monotonic()
+        if previously_loaded:
+            emit("model.unloaded", backend="voxcpm2", model="voxcpm2")
 
     def try_pause(self) -> bool:
         """Nonblocking. Parent may terminate this worker if inference is active."""
@@ -97,13 +102,20 @@ class VoxEngine:
 
     def _load(self) -> None:
         if self._model is None:
+            emit("model.load.started", backend="voxcpm2", model="voxcpm2")
+            load_started = time.perf_counter()
             try:
                 from voxcpm import VoxCPM
-            except ImportError as exc:
-                raise RuntimeError("Missing VoxCPM engine. Run: pip install voxcpm") from exc
-            self._model = VoxCPM.from_pretrained(
-                self.model_name, load_denoiser=False, optimize=self.optimize
-            )
+                self._model = VoxCPM.from_pretrained(
+                    self.model_name, load_denoiser=False, optimize=self.optimize
+                )
+            except Exception as exc:
+                emit("model.load.failed", backend="voxcpm2",
+                     model="voxcpm2", error_type=type(exc).__name__,
+                     elapsed_ms=(time.perf_counter() - load_started) * 1000)
+                raise
+            emit("model.load.completed", backend="voxcpm2", model="voxcpm2",
+                 elapsed_ms=(time.perf_counter() - load_started) * 1000)
 
     def unload(self) -> None:
         with self._lock:
@@ -212,6 +224,8 @@ class VoxEngine:
                    reference_text, seed, steps, cfg)
             scratch_audio = self._style_cache.get(key)
             if scratch_audio is None:
+                emit("style.reference.started", backend="voxcpm2", cached=False)
+
                 scratch_audio = self.generate(
                     "Hello there.", reference_path=reference_path,
                     reference_text=reference_text, description=style,
@@ -220,8 +234,10 @@ class VoxEngine:
                 self._style_cache[key] = scratch_audio
                 if len(self._style_cache) > 12:
                     self._style_cache.popitem(last=False)
+                emit("style.reference.completed", backend="voxcpm2", cached=False)
             else:
                 self._style_cache.move_to_end(key)
+                emit("style.reference.cached", backend="voxcpm2", cached=True)
             scratch_path = None
             try:
                 with tempfile.NamedTemporaryFile(
@@ -306,7 +322,8 @@ class VoxEngine:
             except Exception as exc:
                 self.last_error = {"stage": "model_load", "type": type(exc).__name__,
                                    "message": str(exc)[:1000]}
-                LOG.exception("[TTS API] Failed to load VoxCPM2")
+                emit("generation.failed", backend="voxcpm2",
+                     error_type=type(exc).__name__)
                 raise
             self._last_activity = time.monotonic()
             kwargs = {"text": f"({description}){text}" if description else text,
@@ -331,8 +348,10 @@ class VoxEngine:
                                          for marker in COMPILE_ERROR_MARKERS)
                     if not self.optimize or not compiler_error:
                         raise
-                    LOG.warning("[TTS API] Optimized inference failed (%s). "
-                                "Retrying this request once without torch.compile.", exc)
+                    emit("model.switch", backend="voxcpm2",
+                         model="voxcpm2", reason="fallback")
+                    LOG.warning("[TTS API] Optimized inference incompatible; "
+                                "retrying once without torch.compile.")
                     self.optimize = False
                     self.compile_fallback_used = True
                     self._unload_locked()
@@ -352,7 +371,8 @@ class VoxEngine:
             except Exception as exc:
                 self.last_error = {"stage": "generation", "type": type(exc).__name__,
                                    "message": str(exc)[:1000]}
-                LOG.exception("[TTS API] Speech generation failed")
+                emit("generation.failed", backend="voxcpm2",
+                     error_type=type(exc).__name__)
                 raise
             finally:
                 self._last_activity = time.monotonic()
