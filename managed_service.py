@@ -278,6 +278,17 @@ class ManagedTTS:
     def _spawn(self):
         if self._disabled or self._running() or self._stop.is_set():
             return False
+        # When a child crashes unexpectedly, the old liveness pipe is still
+        # held by this parent. Close it before starting a replacement.
+        if self._process is not None and self._process.poll() is not None:
+            self._process = None
+            self._owns_child = False
+            if self._parent_write_fd is not None:
+                try:
+                    os.close(self._parent_write_fd)
+                except OSError:
+                    pass
+                self._parent_write_fd = None
         executable = self._python()
         if not executable.is_file():
             if not self._skip_warning:
