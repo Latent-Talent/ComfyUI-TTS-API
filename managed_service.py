@@ -340,9 +340,9 @@ class ManagedTTS:
     def start(self):
         try:
             from .queue_bridge import BROKER
-            BROKER.configure(self)
         except ImportError:
-            pass
+            from queue_bridge import BROKER
+        BROKER.configure(self)
         with self._lock:
             # Skip events from prior ComfyUI sessions, but retain new events
             # written immediately after the managed worker is spawned.
@@ -469,10 +469,10 @@ class ManagedTTS:
                 # Other pending prompts must wait for its queue slot to finish.
                 try:
                     from .queue_bridge import BROKER
-                    tts_active = BROKER.active()
-                    tts_queued = BROKER.outstanding()
                 except ImportError:
-                    tts_active = tts_queued = False
+                    from queue_bridge import BROKER
+                tts_active = BROKER.active()
+                tts_queued = BROKER.outstanding()
                 busy = not tts_active and (
                     self._queue_has_real_running() or
                     (not tts_queued and self._queue_busy())
@@ -499,12 +499,12 @@ class ManagedTTS:
     def reserve_for_comfy(self):
         try:
             from .queue_bridge import BROKER
-            if BROKER.outstanding() and not self._queue_has_real_running():
-                # TTS is already ahead in the actual queue. Do not kill its
-                # HTTP worker just because another job was submitted behind it.
-                return
         except ImportError:
-            pass
+            from queue_bridge import BROKER
+        if BROKER.outstanding() and not self._queue_has_real_running():
+            # TTS is already ahead in the actual queue. Do not kill its
+            # HTTP worker just because another job was submitted behind it.
+            return
         with self._lock:
             self._reserved = True
             self._hold_until = time.monotonic() + 2.0
