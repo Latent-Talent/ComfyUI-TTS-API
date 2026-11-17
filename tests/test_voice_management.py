@@ -53,6 +53,9 @@ def test_edit_reference_replaces_wav_in_place_not_voice_id(tmp_path):
     assert edited["reference_file"] == original["reference_file"]
     assert store.audio_path(edited).read_bytes() == replacement
     assert store.audio_path(edited).read_bytes() != old_data
+    if os.name == "posix":
+        assert store.audio_path(edited).stat().st_mode & 0o777 == 0o600
+        assert store._path(edited["id"]).stat().st_mode & 0o777 == 0o600
     assert not list(tmp_path.glob(".*.tmp"))
     assert store.delete(original["id"])
     assert not list(tmp_path.glob("*.wav"))
