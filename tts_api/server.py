@@ -26,7 +26,11 @@ from .engine import VoxEngine
 from .storage import VoiceStore
 from .qwen_engine import QwenEngine
 from .index_engine import IndexEngine
-from .model_storage import configure_model_storage, hf_hub_cache, index_checkpoints, index_python, model_root
+from .model_storage import (
+    configure_model_storage, hf_hub_cache, index_checkpoints, index_python,
+    index_weights_downloaded, model_root, qwen_weights_downloaded,
+)
+from .model_defaults import all_defaults, effective_defaults, save_defaults
 from .comfy_queue import QueueUnavailable, queued_tts
 from .operations import REQUEST_ID, configure as configure_operations, emit
 from .models import (
@@ -428,20 +432,21 @@ async def voices():
     ]}
 
 
+def weights_downloaded(model_id: str) -> bool:
+    if model_id == VOX_ID:
+        return True  # VoxCPM uses automatic lazy model loading.
+    if model_id == INDEX_ID:
+        return index_weights_downloaded()
+    if model_id in QWEN_MODELS:
+        return qwen_weights_downloaded(QWEN_MODELS[model_id]["repo"])
+    return False
+
+
 @app.get("/api/models", dependencies=[Depends(authenticate)])
 async def list_models():
     models = model_catalog()
-    try:
-        from huggingface_hub import try_to_load_from_cache
-        for record in models:
-            if "repo" in record:
-                if record["id"] == INDEX_ID:
-                    record["cache_detected"] = (index_checkpoints() / "config.yaml").is_file()
-                else:
-                    cached = try_to_load_from_cache(record["repo"], "config.json", cache_dir=str(hf_hub_cache()))
-                    record["cache_detected"] = isinstance(cached, str)
-    except ImportError:
-        pass
+    for record in models:
+        record["cache_detected"] = weights_downloaded(record["id"])
     return {
         "active_model": ACTIVE_MODEL,
         "models": models,
@@ -452,6 +457,33 @@ async def list_models():
                         (QWEN_ENGINE.loaded_model if QWEN_ENGINE.loaded
                          else (VOX_ID if ENGINE.loaded else None)),
     }
+
+
+class ModelDefaultsUpdate(BaseModel):
+    model_id: str
+    settings: dict = Field(default_factory=dict)
+    reset: bool = False
+
+
+@app.get("/api/models/defaults", dependencies=[Depends(authenticate)])
+async def get_model_defaults():
+    return {"models": await anyio.to_thread.run_sync(all_defaults, ROOT)}
+
+
+@app.post("/api/models/defaults", dependencies=[Depends(authenticate)])
+async def update_model_defaults(request: ModelDefaultsUpdate):
+    try:
+        settings = await anyio.to_thread.run_sync(
+            lambda: save_defaults(
+                ROOT, request.model_id, request.settings, reset=request.reset
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except OSError:
+        LOG.exception("[TTS API] Could not save model defaults")
+        raise HTTPException(500, "Unable to save model defaults") from None
+    return {"model_id": request.model_id, "settings": settings}
 
 
 class ModelDownloadRequest(BaseModel):
@@ -484,6 +516,8 @@ def _download_model(model_id: str) -> None:
 async def download_model(request: ModelDownloadRequest):
     if request.model_id not in QWEN_MODELS and request.model_id != INDEX_ID:
         raise HTTPException(422, "Select a supported Qwen or IndexTTS model ID")
+    if weights_downloaded(request.model_id):
+        return {"state": "complete", "model_id": request.model_id, "error": None}
     with DOWNLOAD_LOCK:
         if DOWNLOAD_STATUS["state"] == "downloading":
             raise HTTPException(
@@ -508,8 +542,23 @@ async def model_download_status():
         return dict(DOWNLOAD_STATUS)
 
 
+def apply_speech_defaults(request: SpeechRequest) -> SpeechRequest:
+    """Apply only fields absent from the caller's request body."""
+    model_id = canonical_model(request.model, ACTIVE_MODEL, MODEL)
+    profile = effective_defaults(ROOT, model_id)
+    omitted = {
+        key: value for key, value in profile.items()
+        if key not in request.model_fields_set
+    }
+    return request.model_copy(update=omitted) if omitted else request
+
+
 @app.post("/v1/audio/speech", dependencies=[Depends(authenticate)])
 async def speech(request: SpeechRequest):
+    try:
+        request = apply_speech_defaults(request)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
     # Actual ComfyUI output-node job occupies a queue position until the
     # complete audio response is prepared, including FFmpeg conversion.
     try:
@@ -645,6 +694,14 @@ def _design_voice(request: DesignRequest):
 @app.post("/api/voices/design", dependencies=[Depends(authenticate)])
 async def design_voice(request: DesignRequest):
     try:
+        model_id = canonical_model(request.model, ACTIVE_MODEL, MODEL)
+        profile = effective_defaults(ROOT, model_id)
+        design_omitted = {
+            key: profile[key] for key in ("seed", "language")
+            if key in profile and key not in request.model_fields_set
+        }
+        if design_omitted:
+            request = request.model_copy(update=design_omitted)
         async with queued_tts("voice_design"):
             return await _design_voice_in_queue(request)
     except QueueUnavailable as exc:
