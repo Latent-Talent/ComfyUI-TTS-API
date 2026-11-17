@@ -123,6 +123,11 @@ async def status(_request: web.Request) -> web.Response:
     return web.json_response(result, headers={"Cache-Control": "no-store"})
 
 
+async def operations(_request: web.Request) -> web.Response:
+    # Read ONLY the sanitized operations.log, never the raw worker log.
+    return await _forward("GET", "/api/operations?limit=100")
+
+
 async def models(_request: web.Request) -> web.Response:
     return await _forward("GET", "/api/models")
 
@@ -278,6 +283,7 @@ def register_routes():
     from server import PromptServer
     routes = PromptServer.instance.routes
     routes.get(BASE + "/status")(status)
+    routes.get(BASE + "/operations")(operations)
     routes.get(BASE + "/models")(models)
     routes.post(BASE + "/models/download")(download_model)
     routes.get(BASE + "/models/download/status")(model_download_status)
