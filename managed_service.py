@@ -32,6 +32,7 @@ ALLOWED_CONFIG = {
     "TTS_HOST", "TTS_PORT", "TTS_MODEL", "TTS_ACTIVE_MODEL", "TTS_API_KEY",
     "TTS_DATA_DIR", "TTS_MAX_TEXT", "TTS_MAX_UPLOAD_MB",
     "TTS_UNLOAD_AFTER_REQUEST", "TTS_IDLE_UNLOAD_SECONDS", "TTS_AUTO_START",
+    "TTS_MODELS_DIR",
 }
 
 
@@ -270,6 +271,18 @@ class ManagedTTS:
         self._log_handle = (data_dir / "managed-server.log").open("ab", buffering=0)
         environment = os.environ.copy()
         environment.update(self.config)
+        # Model cache location belongs to the child only. Keep ComfyUI's
+        # global Hugging Face and Python environments exactly as they were.
+        selected_models = Path(
+            self.config.get("TTS_MODELS_DIR", str(self.root.parent.parent / "models" / "TTS"))
+        ).expanduser()
+        if not selected_models.is_absolute():
+            selected_models = self.root / selected_models
+        selected_models = selected_models.resolve()
+        environment["TTS_MODELS_DIR"] = str(selected_models)
+        environment["HF_HOME"] = str(selected_models / "huggingface")
+        environment["HF_HUB_CACHE"] = str(selected_models / "huggingface" / "hub")
+        environment["MODELSCOPE_CACHE"] = str(selected_models / "modelscope")
         # ComfyUI may use cudaMallocAsync in its own process. VoxCPM2's
         # compiled CUDA graph path calls checkPoolLiveAllocations, which that
         # allocator cannot implement. Pin ONLY the child to native before
