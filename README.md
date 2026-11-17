@@ -78,6 +78,14 @@ Set the TTS provider to **OpenAI Compatible**, model `voxcpm2` (recommended) or 
 
 **Compatibility aliases:** The model IDs `tts-1`, `tts-1-hd`, `tts-1-1106`, `tts-1-hd-1106`, and `gpt-4o-mini-tts` all invoke the same local **VoxCPM2** backend. They do *not* run an OpenAI model or enable different quality modes. OpenAI default speaker names (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`, etc.) map to the single local default voice; for distinct character voices, create voices in the sidebar and use their persistent `voice_...` IDs. Unknown model names still return 422, and unknown custom voice IDs return 404.
 
+### Saved voices in SillyTavern
+
+SillyTavern's **Available Voices** field is a comma-separated list it sends directly to the TTS server. The server accepts built-in aliases regardless of capitalization or surrounding whitespace (for example ` Alloy `, `NOVA`), and it also accepts **saved voice IDs or unique saved voice display names** from ComfyUI → TTS API → Voices. To assign distinct voices to characters, add the saved IDs or names to SillyTavern's Available Voices field, then set the character-to-voice mappings.
+
+You can inspect saved voices using the ComfyUI TTS API sidebar, or `GET /v1/audio/voices`. Unknown voice names return an explicit 404 identifying the requested name; duplicate saved names return 422 and list the IDs to use instead. The server will **never silently substitute** an unknown character's requested voice with the default.
+
+If the API still responds with exactly `{"detail":"'Unknown voice ID'"}`, you are running an older TTS process. Pull the latest repository and fully restart ComfyUI, then check `http://127.0.0.1:8025/health` for `"version": "0.4.1"`.
+
 Some SillyTavern versions instead ask for an API root; use `http://127.0.0.1:8025/v1` in that case. Enter saved voice IDs manually if your version does not discover them. When SillyTavern runs on a different device, use the ComfyUI host's LAN/VPN address and enable authenticated LAN serving as described below.
 
 ## Voice description vs. delivery instructions
