@@ -32,18 +32,19 @@ class QueueBroker:
         self._lock = threading.RLock()
         self._slots: dict[str, Slot] = {}
         self._manager = None
+        self._queue = None
 
     def configure(self, manager):
         self._manager = manager
 
     def active(self) -> bool:
         with self._lock:
-            return any(slot.state == "running" and not slot.done.is_set()
+            return any(slot.state in ("activating", "running") and not slot.done.is_set()
                        for slot in self._slots.values())
 
     def outstanding(self) -> bool:
         with self._lock:
-            return any(slot.state in ("pending", "running")
+            return any(slot.state in ("pending", "activating", "running")
                        and not slot.done.is_set() for slot in self._slots.values())
 
     def create(self, ticket: str, server, kind: str = "speech") -> str:
@@ -55,6 +56,7 @@ class QueueBroker:
         if queue is None:
             raise RuntimeError("ComfyUI prompt queue is unavailable")
         with self._lock:
+            self._queue = queue
             if ticket in self._slots:
                 raise ValueError("TTS queue ticket already exists")
             prompt_id = str(uuid.uuid4())
@@ -103,9 +105,15 @@ class QueueBroker:
             slot = self._slots.get(ticket)
             if slot is None:
                 return False
+            was_pending = slot.state in ("pending", "cancelled")
             slot.done.set()
             if slot.state != "cancelled":
                 slot.state = "completed"
+            if was_pending:
+                # Never leave an abandoned waiting job in ComfyUI's queue.
+                if self._queue is not None:
+                    self._queue.delete_queue_item(lambda item: item[1] == slot.prompt_id)
+                self._slots.pop(ticket, None)
             return True
 
     def execute(self, ticket: str) -> tuple:
@@ -113,7 +121,7 @@ class QueueBroker:
             slot = self._slots.get(ticket)
             if slot is None or slot.done.is_set():
                 return ()
-            slot.state = "running"
+            slot.state = "activating"
         manager = self._manager
         # The worker might be paused from an earlier ComfyUI workflow.
         # Do not admit speech until it has resumed and this queue item runs.
@@ -121,7 +129,14 @@ class QueueBroker:
             if not manager._request("/api/internal/resume", timeout=4):
                 LOG.warning("[TTS API] Could not resume TTS for queue reservation")
                 self.release(ticket)
+                with self._lock:
+                    self._slots.pop(ticket, None)
                 return ()
+        with self._lock:
+            if slot.done.is_set():
+                self._slots.pop(ticket, None)
+                return ()
+            slot.state = "running"
         started = time.monotonic()
         LOG.info("[TTS API] TTS reservation running %s", slot.prompt_id)
         try:
