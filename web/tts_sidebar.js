@@ -204,7 +204,6 @@ function mount(container) {
     let savedVoices = [];
     const voicePreviewUrls = new Map();
     let renderedDefaultsModel = null;
-    const pendingAudio = new Map();
     let downloadStatus = null;
     let latestCompletedDownload = null;
     const emotionNames = ["happy", "angry", "sad", "afraid", "disgusted",
@@ -257,12 +256,6 @@ function mount(container) {
         updateModelDownloadButton();
         renderModelDefaults();
         refreshVoices().catch(() => {});
-    }
-
-    // Audio inputs are browser-local until Save defaults. Only the registered
-    // saved voice ID is persisted; file bytes never enter the JSON profile.
-    function audioKey(modelId, fieldName) {
-        return modelId + ":" + fieldName;
     }
 
     function fillVoiceOptions(select, spec, modelId, value) {
@@ -369,61 +362,7 @@ function mount(container) {
             } else if (spec.kind === "audio_voice") {
                 control = document.createElement("select");
                 fillVoiceOptions(control, spec, selected, String(value || ""));
-                const chooser = document.createElement("label");
-                chooser.className = "tts-audio-picker";
-                const heading = document.createElement("span");
-                heading.textContent = "Or choose an audio file";
-                const fileInput = document.createElement("input");
-                fileInput.type = "file";
-                fileInput.accept = "audio/*,.wav,.flac,.ogg,.mp3,.aiff";
-                fileInput.dataset.audioFile = spec.name;
-                const consent = document.createElement("label");
-                consent.className = "tts-audio-consent";
-                const checkbox = document.createElement("input");
-                checkbox.type = "checkbox";
-                checkbox.dataset.audioConsent = spec.name;
-                const consentText = document.createElement("span");
-                consentText.textContent = "I have permission to use this recording";
-                consent.append(checkbox, consentText);
-                const fileNote = document.createElement("small");
-                fileNote.className = "tts-muted";
-                const key = audioKey(selected, spec.name);
-                const pending = pendingAudio.get(key);
-                if (pending) {
-                    fileNote.textContent = "Will upload on Save: " + pending.file.name;
-                    checkbox.checked = pending.consent;
-                }
-                consent.hidden = !pending;
-                chooser.append(heading, fileInput);
-                const selectLabel = document.createElement("label");
-                selectLabel.className = "tts-audio-saved";
-                // The field label already identifies this choice; avoid a second label.
-                selectLabel.append(control);
-                label.append(selectLabel, chooser, consent, fileNote);
-                fileInput.addEventListener("change", () => {
-                    const file = fileInput.files?.[0];
-                    if (file) {
-                        pendingAudio.set(key, {file, consent: false});
-                        checkbox.checked = false;
-                        consent.hidden = false;
-                        fileNote.textContent = "Will upload on Save: " + file.name;
-                    } else {
-                        pendingAudio.delete(key);
-                        consent.hidden = true;
-                        fileNote.textContent = "";
-                    }
-                });
-                checkbox.addEventListener("change", () => {
-                    const current = pendingAudio.get(key);
-                    if (current) current.consent = checkbox.checked;
-                });
-                control.addEventListener("change", () => {
-                    pendingAudio.delete(key);
-                    fileInput.value = "";
-                    consent.hidden = true;
-                    checkbox.checked = false;
-                    fileNote.textContent = "";
-                });
+                label.append(control);
             } else if (spec.kind === "select") {
                 control = document.createElement("select");
                 spec.options.forEach((choice) => {
@@ -491,35 +430,6 @@ function mount(container) {
         return voice;
     }
 
-    async function uploadPendingDefaultAudio(payload) {
-        const modelId = payload.model_id;
-        const profile = defaultsByModel[modelId];
-        // Validate every selected recording before uploading any of them,
-        // avoiding a partial saved-voice creation if another file lacks consent.
-        const uploads = [];
-        for (const spec of profile.fields.filter((f) => f.kind === "audio_voice")) {
-            const key = audioKey(modelId, spec.name);
-            const pending = pendingAudio.get(key);
-            const row = $("[data-model-defaults-fields]")
-                .querySelector('[data-default-row="' + spec.name + '"]');
-            if (!pending || row?.hidden) continue;
-            if (!pending.consent) {
-                throw new Error("Confirm permission to use " + spec.label + ".");
-            }
-            if (!pending.file.size || pending.file.size > 20 * 1024 * 1024) {
-                throw new Error("Choose a valid audio file under 20 MB for " + spec.label + ".");
-            }
-            uploads.push({key, spec, pending});
-        }
-        for (const {key, spec, pending} of uploads) {
-            const voice = await registerAudioFile(
-                pending.file, pending.consent, spec.label
-            );
-            payload.settings[spec.name] = voice.id;
-            pendingAudio.delete(key);
-        }
-    }
-
     function readModelDefaults() {
         const modelId = $("[data-selected-model]").value;
         const profile = defaultsByModel[modelId];
@@ -551,17 +461,15 @@ function mount(container) {
             }
         }
         if (modelId === "indextts-2.5") {
-            const queuedAudio = (name) => pendingAudio.has(audioKey(modelId, name));
-            if (!values.voice && !queuedAudio("voice")) {
-                throw new Error("IndexTTS requires a saved voice or selected audio file.");
+            if (!values.voice) {
+                throw new Error("IndexTTS requires a saved voice. Add one under Voices.");
             }
             if (values.emotion_mode === "text" && !values.instructions.trim()) {
                 throw new Error("Enter an emotion description for Text mode.");
             }
             if (values.emotion_mode === "reference" &&
-                !values.emotion_reference_voice &&
-                !queuedAudio("emotion_reference_voice")) {
-                throw new Error("Select saved emotion audio or browse for an audio file.");
+                !values.emotion_reference_voice) {
+                throw new Error("Select a saved emotion reference voice.");
             }
         }
         return {model_id: modelId, settings: values};
@@ -1068,7 +976,6 @@ function mount(container) {
     $("[data-action=save-model-defaults]").addEventListener("click", (e) => perform(
         e.currentTarget, async () => {
             const payload = readModelDefaults();
-            await uploadPendingDefaultAudio(payload);
             const response = await (await request("/models/defaults", {
                 method: "POST", headers: {"Content-Type": "application/json"},
                 body: JSON.stringify(payload),
@@ -1087,9 +994,6 @@ function mount(container) {
                 body: JSON.stringify({model_id: modelId, settings: {}, reset: true}),
             })).json();
             defaultsByModel[modelId].values = response.settings;
-            for (const key of pendingAudio.keys()) {
-                if (key.startsWith(modelId + ":")) pendingAudio.delete(key);
-            }
             renderModelDefaults(true);
             if ($("[data-test-model]").value === modelId) applyTestDefaults();
         }, "Built-in defaults restored for this model."
