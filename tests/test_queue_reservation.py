@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import pytest
 from fastapi.testclient import TestClient
 
-from queue_bridge import QueueBroker, TTSQueueSlot
+from queue_bridge import QueueBroker, TTSQueueSlot, completion_ui
 from managed_service import ManagedTTS
 from tts_api import server
 from tts_api.comfy_queue import QueueClient, QueueUnavailable
@@ -108,7 +108,11 @@ def test_queue_node_blocks_running_slot_until_worker_releases():
     assert broker.release(ticket)
     worker.join(timeout=2)
     assert not worker.is_alive()
-    assert result == [()]
+    assert result == [completion_ui("voice_design")]
+    marker = result[0]["ui"]["text"][0]
+    assert marker["filename"] == "TTS · Voice design completed"
+    assert marker["content"].startswith("TTS · Voice design completed")
+    assert marker["type"] == "temp"
     assert not broker.active()
     assert not broker.outstanding()
     assert ("resume", "/api/internal/resume") in manager.calls
@@ -215,3 +219,42 @@ def test_speech_and_design_are_wrapped_in_queue_reservation(monkeypatch, tmp_pat
         "acquire speech", "release speech",
         "acquire voice_design", "release voice_design",
     ]
+
+
+def test_completed_speech_job_has_tts_history_filename_and_no_speech_content():
+    from queue_bridge import COMPLETION_LABELS
+    assert set(COMPLETION_LABELS) == {"speech", "voice_design"}
+    marker = completion_ui("speech")
+    assert set(marker) == {"ui"}
+    assert set(marker["ui"]) == {"text"}
+    item = marker["ui"]["text"][0]
+    assert item["filename"] == "TTS · Speech completed"
+    assert item["content"] == (
+        "TTS · Speech completed. Audio was returned through the TTS API."
+    )
+    assert item["subfolder"] == ""
+    assert item["type"] == "temp"
+    assert "ticket" not in str(marker)
+    assert "transcript" not in str(marker)
+    assert "instructions" not in str(marker)
+
+
+def test_completed_history_label_retains_voice_design_operation():
+    broker = QueueBroker()
+    srv = FakePromptServer()
+    manager = FakeManager()
+    broker.configure(manager)
+    ticket = new_ticket()
+    broker.create(ticket, srv, kind="speech")
+    srv.prompt_queue.start_next()
+    outputs = []
+    worker = threading.Thread(target=lambda: outputs.append(broker.execute(ticket)))
+    worker.start()
+    deadline = time.monotonic() + 2
+    while broker.state(ticket, srv.prompt_queue) != "running":
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert broker.release(ticket)
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert outputs == [completion_ui("speech")]
