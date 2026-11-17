@@ -233,6 +233,9 @@ The first speech request downloads model weights; failures involving Torch/CUDA 
 
 ## TTS console logging (without speech text)
 
+**Model-load authorization:** In managed mode, neither VoxCPM2 nor Qwen3-TTS is permitted to load weights **or run inference** until an authenticated ComfyUI queue ticket has become active. The same requirement applies to cached models. The terminal's `model.load.started` event now includes the safe operation kind (`speech` or `voice_design`) and a matching request ID (`req=...`) from the prior `request.started` event. This distinguishes actual model loads from `Managed speech server started`, which merely launches the lightweight HTTP service. A queued SillyTavern request may legitimately start model loading later when its queue position is reached.
+
+
 The managed TTS worker now reports operational events **directly in the main ComfyUI terminal/console**. No extra sidebar tab or activity endpoint is needed. Watch the same terminal where ComfyUI started: events are labeled `[TTS API]`. This covers requests, model loading/unloading and switching, Qwen downloads, voice design/cloning, timing, cache usage, and failures.
 
 For example:
