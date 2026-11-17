@@ -48,6 +48,7 @@ class Slot:
     kind: str = "speech"
     created: float = field(default_factory=time.monotonic)
     state: str = "pending"
+    result: str | None = None
     done: threading.Event = field(default_factory=threading.Event)
 
 
@@ -123,12 +124,15 @@ class QueueBroker:
                     slot.done.set()
             return slot.state
 
-    def release(self, ticket: str) -> bool:
+    def release(self, ticket: str, status: str = "completed") -> bool:
+        if status not in ("completed", "failed"):
+            raise ValueError("Invalid TTS queue result")
         with self._lock:
             slot = self._slots.get(ticket)
             if slot is None:
                 return False
             was_pending = slot.state in ("pending", "cancelled")
+            slot.result = status
             slot.done.set()
             if slot.state != "cancelled":
                 slot.state = "completed" if was_pending else "releasing"
@@ -190,6 +194,11 @@ class QueueBroker:
                 slot.state = "completed"
                 self._slots.pop(ticket, None)
             LOG.info("[TTS API] TTS queue slot released %s", slot.prompt_id)
+        if slot.result != "completed":
+            # A failed/cancelled HTTP request must not appear as a successful
+            # ComfyUI history entry. Keep the exception message constant so
+            # neither speech text nor third-party exception strings leak.
+            raise RuntimeError("TTS queue operation did not complete")
         return completion_ui(slot.kind)
 
 
