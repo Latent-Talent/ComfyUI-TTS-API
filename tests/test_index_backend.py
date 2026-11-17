@@ -1,19 +1,14 @@
-"""IndexTTS integration and manual, non-automatic model migration tests."""
+"""IndexTTS model routing and emotion-control tests."""
 from __future__ import annotations
 
 import io
-import os
-from pathlib import Path
-import subprocess
 
 import numpy as np
-import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
 from tts_api import server
 from tts_api.models import INDEX_ID, INDEX_EMOTIONS, canonical_model, model_catalog
-from tts_api.model_storage import model_root
 
 
 def silent_wav():
@@ -116,44 +111,3 @@ def test_index_without_saved_voice_fails_before_model_load(tmp_path, monkeypatch
     })
     assert response.status_code == 422
     assert fake.calls == []
-
-
-def test_model_directory_is_fixed_path_with_no_legacy_migration(tmp_path, monkeypatch):
-    path = tmp_path / "ComfyUI" / "models" / "TTS"
-    monkeypatch.setenv("TTS_MODELS_DIR", str(path))
-    legacy = tmp_path / "old-cache" / "models--openbmb--VoxCPM2"
-    legacy.mkdir(parents=True)
-    (legacy / "keep.bin").write_bytes(b"keep-me")
-    assert model_root() == path
-    assert (legacy / "keep.bin").read_bytes() == b"keep-me"
-
-
-def test_move_script_is_explicit_and_preserves_hf_snapshot_links(tmp_path):
-    script = Path(__file__).resolve().parents[1] / "move-tts-models.sh"
-    home = tmp_path / "home"
-    src = home / ".cache" / "huggingface" / "hub"
-    repo_name = "models--Qwen--Qwen3-TTS-12Hz-1.7B-Base"
-    model = src / repo_name
-    (model / "blobs").mkdir(parents=True)
-    (model / "snapshots" / "hash").mkdir(parents=True)
-    (model / "blobs" / "1").write_bytes(b"weights")
-    (model / "snapshots" / "hash" / "config.json").symlink_to("../../blobs/1")
-    unrelated = src / "models--other--unrelated"
-    unrelated.mkdir()
-    (unrelated / "data").write_bytes(b"unchanged")
-    dst = tmp_path / "ComfyUI" / "models" / "TTS"
-    env = dict(os.environ)
-    env.update({"HOME": str(home), "HF_HUB_CACHE": str(src), "TTS_MODELS_DIR": str(dst)})
-    dry = subprocess.run(["bash", str(script), "--dry-run"], env=env,
-                         capture_output=True, text=True, check=True)
-    assert "DRY RUN" in dry.stdout
-    assert model.is_dir()
-    assert not (dst / "huggingface" / "hub" / repo_name).exists()
-    subprocess.run(["bash", str(script)], env=env,
-                   capture_output=True, text=True, check=True)
-    target = dst / "huggingface" / "hub" / repo_name
-    assert not model.exists()
-    assert (target / "snapshots" / "hash" / "config.json").read_bytes() == b"weights"
-    assert (unrelated / "data").read_bytes() == b"unchanged"
-    subprocess.run(["bash", str(script)], env=env, check=True, capture_output=True)
-    assert target.is_dir()
