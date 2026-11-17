@@ -139,6 +139,8 @@ When TTS runs under the managed ComfyUI installation, **each speech or voice-des
 
 The custom node `LatentTalentTTSQueueSlot` is an internal implementation detail, not a user workflow node: it carries only a random UUID ticket. Speech content, voice descriptions, instructions, and API keys never enter ComfyUI's prompt queue or history. The TTS worker stays in its isolated Python/CUDA process.
 
+**Completed queue history entries are labeled** `TTS · Speech completed` or `TTS · Voice design completed` instead of a generic job number. The internal reservation emits a tiny inline text-only preview containing this label; no speech content or generated audio is written into ComfyUI output files. Clicking View shows only the same completion label. Failed TTS calls are reported as failed ComfyUI queue jobs, not mislabeled as successfully completed.
+
 - New speech requests wait for earlier ComfyUI workflows, and multiple TTS requests get their own queue positions.
 - While a TTS reservation runs, later submitted ComfyUI jobs stay pending; they no longer interrupt an active TTS job merely by being submitted.
 - A canceled pending reservation is discarded. Interrupting a running reservation stops the managed TTS worker before releasing GPU ownership.
