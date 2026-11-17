@@ -66,3 +66,22 @@
 .tts-ui audio { width: 100%; border-radius: 9px; }
 .tts-ui .tts-feedback { border: 1px solid var(--tts-border); border-radius: 8px; padding: 10px; line-height: 1.45; background: var(--tts-field); overflow-wrap: anywhere; }
 .tts-ui .tts-feedback.is-error { border-color: #be6c6c; color: #e4a0a0; }
+
+/* Bounded, readable event history; never interpret log content as HTML. */
+.tts-ui .tts-activity-list {
+  max-height: 420px;
+  min-height: 180px;
+  overflow: auto;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--tts-border);
+  border-radius: 7px;
+  background: var(--tts-field);
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
