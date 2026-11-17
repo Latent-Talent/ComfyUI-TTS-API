@@ -20,6 +20,7 @@ import soundfile as sf
 
 from .operations import emit
 from .comfy_queue import active_request_kind, require_queue_reservation
+from .memory import release_unused_cuda
 
 from .models import QWEN_MODELS, QWEN_SPEAKERS_LOOKUP
 
@@ -57,10 +58,7 @@ class QwenEngine:
         self._model = None
         self._model_id = None
         del model
-        gc.collect()
-        torch = sys.modules.get("torch")
-        if torch is not None and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        release_unused_cuda()
         self._last_activity = time.monotonic()
         if previous:
             emit("model.unloaded", backend="qwen3-tts", model=previous)
@@ -124,6 +122,12 @@ class QwenEngine:
         try:
             self._model = Qwen3TTSModel.from_pretrained(repo, **kwargs)
         except Exception as exc:
+            # Failed HF loads may have created temporary CUDA allocations
+            # without ever assigning a fully constructed model to self.
+            self._model = None
+            self._model_id = None
+            self._prompt_cache.clear()
+            release_unused_cuda()
             emit("model.load.failed", backend="qwen3-tts", model=model_id,
                  error_type=type(exc).__name__,
                  elapsed_ms=(time.perf_counter() - started) * 1000)
