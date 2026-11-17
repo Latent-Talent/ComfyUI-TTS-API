@@ -64,6 +64,11 @@
 .tts-ui .tts-primary:hover:not(:disabled) { filter: brightness(1.07); background: var(--p-primary-color, #536ba9); }
 .tts-ui .tts-test-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .tts-ui audio { width: 100%; border-radius: 9px; }
+.tts-ui .tts-record-controls { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.tts-ui .tts-record-controls > .tts-muted { font-size: 11px; }
+.tts-ui .tts-record-controls .tts-actions button { flex: 1 1 auto; }
+.tts-ui .tts-record-controls [data-clone-record-status] { line-height: 1.45; overflow-wrap: anywhere; }
+.tts-ui .tts-record-controls audio { width: 100%; }
 .tts-ui .tts-feedback { border: 1px solid var(--tts-border); border-radius: 8px; padding: 10px; line-height: 1.45; background: var(--tts-field); overflow-wrap: anywhere; }
 .tts-ui .tts-feedback.is-error { border-color: #be6c6c; color: #e4a0a0; }
 
