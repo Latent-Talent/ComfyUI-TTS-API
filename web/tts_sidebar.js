@@ -806,6 +806,7 @@ function mount(container) {
             editButton.setAttribute("aria-controls", editorId);
             editButton.addEventListener("click", () => {
                 editor.hidden = !editor.hidden;
+                if (editor.hidden) editor.querySelector("audio")?.pause();
                 editButton.setAttribute("aria-expanded", String(!editor.hidden));
                 editButton.textContent = editor.hidden ? "View / Edit" : "Close details";
             });
@@ -882,6 +883,11 @@ function mount(container) {
                 player.controls = true;
                 player.preload = "none";
                 player.hidden = true;
+                player.addEventListener("play", () => {
+                    root.querySelectorAll(".tts-voice-editor audio").forEach((other) => {
+                        if (other !== player) other.pause();
+                    });
+                });
                 listenButton.addEventListener("click", async () => {
                     if (!player.hidden) {
                         player.pause();
@@ -905,6 +911,7 @@ function mount(container) {
                             return;
                         } finally {
                             listenButton.disabled = false;
+                            if (!player.src) listenButton.textContent = "Preview reference recording";
                         }
                     }
                     player.hidden = false;
