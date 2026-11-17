@@ -26,6 +26,19 @@ LOG = logging.getLogger("comfyui-tts-api.server")
 ROOT = Path(os.environ.get("TTS_DATA_DIR", "./data")).expanduser().resolve()
 STORE = VoiceStore(ROOT / "voices")
 MODEL = os.environ.get("TTS_MODEL", "openbmb/VoxCPM2")
+# SillyTavern's OpenAI Compatible TTS defaults to tts-1. These model IDs
+# are compatibility aliases; they all invoke the same local VoxCPM2 weights.
+# Do not imply that an actual OpenAI model or HD engine runs locally.
+OPENAI_MODEL_ALIASES = frozenset({
+    "tts-1", "tts-1-hd", "tts-1-1106", "tts-1-hd-1106",
+    "gpt-4o-mini-tts",
+})
+# SillyTavern also defaults to these OpenAI voice names. Map them to the
+# default local voice; distinct characters still use persisted voice_... IDs.
+OPENAI_VOICE_ALIASES = frozenset({
+    "alloy", "echo", "fable", "onyx", "nova", "shimmer",
+    "ash", "ballad", "coral", "sage", "verse", "marin", "cedar",
+})
 ENGINE = VoxEngine(MODEL, os.getenv("TTS_UNLOAD_AFTER_REQUEST", "false").lower() == "true")
 KEY = os.getenv("TTS_API_KEY", "")
 MAX_TEXT = int(os.getenv("TTS_MAX_TEXT", "12000"))
@@ -92,11 +105,18 @@ class DesignRequest(BaseModel):
 def _render(request: SpeechRequest) -> bytes:
     if len(request.input) > MAX_TEXT:
         raise ValueError(f"Input longer than {MAX_TEXT} characters")
-    if request.model not in ("voxcpm2", MODEL):
-        raise ValueError("Unknown model. Supported model: voxcpm2")
-    voice = None if request.voice == "default" else STORE.get(request.voice)
-    if request.voice != "default" and voice is None:
-        raise KeyError("Unknown voice ID")
+    if request.model not in ({"voxcpm2", MODEL} | OPENAI_MODEL_ALIASES):
+        raise ValueError(
+            f"Unknown model: {request.model!r}. Set SillyTavern's model to "
+            "'voxcpm2' or use its default 'tts-1' compatibility alias."
+        )
+    # OpenAI voice names are aliases, not different pretrained voices.
+    voice_id = ("default" if request.voice == "default"
+                or request.voice.lower() in OPENAI_VOICE_ALIASES
+                else request.voice)
+    voice = None if voice_id == "default" else STORE.get(voice_id)
+    if voice_id != "default" and voice is None:
+        raise KeyError(f"Unknown voice ID: {request.voice!r}. Use 'default' or a saved voice_... ID.")
     ref = str(STORE.audio_path(voice)) if voice and voice.get("reference_file") else None
     # Unlike direct VoxCPM2 prefixing, this produces ONLY request.input as
     # final spoken text. A short, cached voice-reference pass carries delivery
@@ -143,8 +163,11 @@ async def internal_resume(x_tts_control_token: str | None = Header(default=None)
 
 @app.get("/v1/models", dependencies=[Depends(authenticate)])
 async def models():
-    return {"object": "list", "data": [{"id": "voxcpm2", "object": "model",
-                                        "owned_by": "local"}]}
+    return {"object": "list", "data": [
+        {"id": "voxcpm2", "object": "model", "owned_by": "local"},
+        *[{"id": alias, "object": "model", "owned_by": "local-voxcpm2-alias"}
+          for alias in sorted(OPENAI_MODEL_ALIASES)],
+    ]}
 
 
 @app.get("/v1/audio/voices", dependencies=[Depends(authenticate)])
