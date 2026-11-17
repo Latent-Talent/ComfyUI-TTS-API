@@ -77,6 +77,7 @@ class VoiceStore:
             if reference is not None:
                 target = self.root / f"{voice_id}.wav"
                 with target.open("xb") as fh:
+                    os.fchmod(fh.fileno(), 0o600)
                     fh.write(reference)
                 record["reference_file"] = target.name
             try:
@@ -102,6 +103,7 @@ class VoiceStore:
                 tmp = self.root / f".{voice_id}.{uuid.uuid4().hex}.wav.tmp"
                 try:
                     with tmp.open("xb") as fh:
+                        os.fchmod(fh.fileno(), 0o600)
                         fh.write(reference)
                         fh.flush()
                         os.fsync(fh.fileno())
