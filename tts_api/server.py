@@ -8,6 +8,8 @@ import importlib.util
 import logging
 import os
 import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 import subprocess
 import shutil
@@ -23,6 +25,7 @@ from pydantic import BaseModel, Field
 from .engine import VoxEngine
 from .storage import VoiceStore
 from .qwen_engine import QwenEngine
+from .operations import REQUEST_ID, configure as configure_operations, emit, recent
 from .models import (
     VOX_ID, QWEN_DEFAULT, QWEN_DESIGN, QWEN_MODELS, QWEN_SPEAKERS,
     QWEN_SPEAKERS_LOOKUP, OPENAI_MODEL_ALIASES, OPENAI_VOICE_ALIASES,
@@ -68,6 +71,8 @@ async def _reap_idle_model():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_operations(ROOT)
+    emit("service.started", model=ACTIVE_MODEL, status="running")
     task = asyncio.create_task(_reap_idle_model())
     try:
         yield
@@ -79,9 +84,40 @@ async def lifespan(app: FastAPI):
             pass
         await anyio.to_thread.run_sync(ENGINE.unload)
         await anyio.to_thread.run_sync(QWEN_ENGINE.unload)
+        emit("service.stopped", reason="shutdown")
 
 
 app = FastAPI(title="ComfyUI TTS API", version="0.5.0", lifespan=lifespan)
+
+@app.middleware("http")
+async def operation_request_logging(request, call_next):
+    kind = {
+        "/v1/audio/speech": "speech",
+        "/api/voices/design": "voice_design",
+        "/api/voices/clone": "voice_clone",
+        "/api/models/download": "download",
+    }.get(request.url.path)
+    if kind is None or request.method != "POST":
+        return await call_next(request)
+    token = REQUEST_ID.set(uuid.uuid4().hex[:12])
+    start = time.perf_counter()
+    emit("request.started", kind=kind, status="starting")
+    try:
+        response = await call_next(request)
+        emit(
+            "request.completed" if response.status_code < 400 else "request.failed",
+            kind=kind, status="ok" if response.status_code < 400 else "error",
+            elapsed_ms=(time.perf_counter() - start) * 1000,
+        )
+        return response
+    except Exception as exc:
+        emit("request.failed", kind=kind, status="error",
+             error_type=type(exc).__name__,
+             elapsed_ms=(time.perf_counter() - start) * 1000)
+        raise
+    finally:
+        REQUEST_ID.reset(token)
+
 
 
 async def authenticate(authorization: str | None = Header(default=None),
@@ -171,6 +207,12 @@ def _render(request: SpeechRequest) -> bytes:
     voice = _resolve_voice(request.voice, backend=model_id)
     ref = str(STORE.audio_path(voice)) if voice and voice.get("reference_file") else None
     reference_text = voice.get("reference_text") if voice and ref else None
+    emit("generation.started", model=model_id,
+         backend="qwen3-tts" if is_qwen(model_id) else "voxcpm2",
+         voice_type="saved" if voice is not None
+         else ("preset" if is_qwen(model_id) else "default"),
+         has_reference=bool(ref), has_instructions=bool(request.instructions),
+         characters=len(request.input), steps=request.steps if not is_qwen(model_id) else 0)
 
     # All backend switching occurs inside this serialized section. No two GPU
     # models are retained across VoxCPM / Qwen3-TTS requests.
@@ -183,19 +225,27 @@ def _render(request: SpeechRequest) -> bytes:
                 if not ref:
                     raise ValueError("Saved voice has no reference audio to clone")
                 actual_model = qwen_base_for(model_id)
-            return QWEN_ENGINE.generate(
+            result = QWEN_ENGINE.generate(
                 actual_model, request.input, voice=request.voice,
                 reference_path=ref, reference_text=reference_text,
                 instructions=request.instructions, language=request.language,
                 seed=request.seed,
             )
+            emit("generation.completed", model=actual_model, backend="qwen3-tts",
+                 audio_bytes=len(result), audio_seconds=QWEN_ENGINE.last_stats.get("audio_seconds", 0.0),
+                 elapsed_ms=QWEN_ENGINE.last_stats.get("seconds", 0.0) * 1000)
+            return result
         if QWEN_ENGINE.loaded:
             QWEN_ENGINE.unload()
-        return ENGINE.generate_with_delivery(
+        result = ENGINE.generate_with_delivery(
             request.input, instructions=request.instructions,
             reference_path=ref, reference_text=reference_text or None,
             seed=request.seed, steps=request.steps, cfg=request.cfg,
         )
+        emit("generation.completed", model=VOX_ID, backend="voxcpm2",
+             audio_bytes=len(result), audio_seconds=ENGINE.last_stats.get("audio_seconds", 0.0),
+             elapsed_ms=ENGINE.last_stats.get("seconds", 0.0) * 1000)
+        return result
 
 
 @app.get("/health")
@@ -249,7 +299,9 @@ def _unload_both():
 async def internal_pause(x_tts_control_token: str | None = Header(default=None)):
     _authorize_control(x_tts_control_token)
     if not await anyio.to_thread.run_sync(_pause_both):
+        emit("worker.pause_blocked", reason="workflow", status="error")
         raise HTTPException(409, "TTS is currently generating audio")
+    emit("worker.paused", reason="workflow", status="paused")
     return {"paused": True, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded}
 
 
@@ -257,6 +309,7 @@ async def internal_pause(x_tts_control_token: str | None = Header(default=None))
 async def internal_resume(x_tts_control_token: str | None = Header(default=None)):
     _authorize_control(x_tts_control_token)
     await anyio.to_thread.run_sync(_resume_both)
+    emit("worker.resumed", reason="workflow", status="running")
     return {"paused": False, "loaded": ENGINE.loaded or QWEN_ENGINE.loaded}
 
 
@@ -282,6 +335,11 @@ async def voices():
            "description": v.get("description", ""), "source": "saved"}
           for v in STORE.list()],
     ]}
+
+
+@app.get("/api/operations", dependencies=[Depends(authenticate)])
+async def operation_history(limit: int = 100):
+    return {"events": recent(limit), "text_logged": False}
 
 
 @app.get("/api/models", dependencies=[Depends(authenticate)])
@@ -313,13 +371,14 @@ def _download_model(model_id: str) -> None:
         from huggingface_hub import snapshot_download
         snapshot_download(QWEN_MODELS[model_id]["repo"])
     except Exception as exc:
-        LOG.exception("[TTS API] Download failed for %s", model_id)
+        emit("download.failed", model=model_id, error_type=type(exc).__name__)
         with DOWNLOAD_LOCK:
             DOWNLOAD_STATUS.update({
                 "state": "failed", "model_id": model_id,
                 "error": str(exc)[:500],
             })
     else:
+        emit("download.completed", model=model_id)
         with DOWNLOAD_LOCK:
             DOWNLOAD_STATUS.update({
                 "state": "complete", "model_id": model_id, "error": None,
@@ -340,6 +399,7 @@ async def download_model(request: ModelDownloadRequest):
             "state": "downloading", "model_id": request.model_id,
             "error": None,
         })
+        emit("download.started", model=request.model_id)
         threading.Thread(
             target=_download_model, args=(request.model_id,),
             name="TTS-Qwen-HF-Download", daemon=True,
@@ -441,7 +501,9 @@ async def clone_voice(name: str = Form(...), reference_text: str = Form(""),
         encoded = output.getvalue()
     except Exception as exc:
         raise HTTPException(422, f"Invalid reference audio: {exc}") from exc
-    return STORE.create(name=name, reference=encoded, reference_text=reference_text)
+    record = STORE.create(name=name, reference=encoded, reference_text=reference_text)
+    emit("voice.clone.saved", kind="voice_clone", audio_bytes=len(encoded))
+    return record
 
 
 def _design_voice(request: DesignRequest):
@@ -470,10 +532,13 @@ async def design_voice(request: DesignRequest):
     except Exception as exc:
         LOG.exception("[TTS API] Voice design error")
         raise HTTPException(503, f"Voice design failed: {exc}") from exc
-    return STORE.create(
+    record = STORE.create(
         name=request.name, description=request.description,
         reference=audio, reference_text=request.sample_text,
     )
+    emit("voice.design.completed", kind="voice_design",
+         characters=len(request.sample_text), audio_bytes=len(audio))
+    return record
 
 
 @app.get("/api/voices", dependencies=[Depends(authenticate)])
@@ -489,10 +554,12 @@ async def delete_voice(voice_id: str):
         raise HTTPException(422, str(exc)) from exc
     if not deleted:
         raise HTTPException(404, "Unknown voice ID")
+    emit("voice.deleted")
     return {"deleted": True}
 
 
 @app.post("/api/model/unload", dependencies=[Depends(authenticate)])
 async def unload_model():
     await anyio.to_thread.run_sync(_unload_both)
+    emit("model.unloaded", reason="manual")
     return {"loaded": False}
