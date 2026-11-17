@@ -11,4 +11,4 @@ fi
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m pip install voxcpm
 if [[ ! -f .env ]]; then cp config.example.env .env; fi
-echo "Install complete. Edit .env if necessary, then run bash start.sh"
+echo "Install complete. Restart ComfyUI normally; it starts and stops the TTS API automatically."
