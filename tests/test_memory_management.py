@@ -145,3 +145,62 @@ def test_reclaim_http_busy_is_classified_not_a_generic_failure(tmp_path, monkeyp
         raise urllib.error.HTTPError("http://localhost", 409, "busy", {}, None)
     monkeypatch.setattr(managed_service.urllib.request, "urlopen", fail)
     assert manager._request_reclaim() == "busy"
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("CUDA out of memory while allocating 400 MiB", True),
+    ("torch.cuda.OutOfMemoryError: failed to allocate", True),
+    ("Unsupported speaker ID", False),
+])
+def test_memory_exhaustion_detection(message, expected):
+    assert memory.is_memory_exhaustion(RuntimeError(message)) is expected
+
+
+def test_vox_inference_oom_drops_resident_checkpoint(monkeypatch):
+    monkeypatch.delenv("TTS_COMFY_QUEUE_URL", raising=False)
+    monkeypatch.delenv("TTS_CONTROL_TOKEN", raising=False)
+    engine = VoxEngine("fake")
+
+    class BrokenModel:
+        def generate(self, **kwargs):
+            raise RuntimeError("CUDA out of memory while allocating tensor")
+
+    engine._model = BrokenModel()
+    monkeypatch.setattr(engine, "_load", lambda: None)
+    unloads = []
+
+    def unload():
+        unloads.append(True)
+        engine._model = None
+
+    monkeypatch.setattr(engine, "_unload_locked", unload)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        engine.generate("Hello")
+    assert not engine.loaded
+    assert len(unloads) == 1
+
+
+def test_qwen_inference_oom_drops_resident_checkpoint(monkeypatch):
+    monkeypatch.delenv("TTS_COMFY_QUEUE_URL", raising=False)
+    monkeypatch.delenv("TTS_CONTROL_TOKEN", raising=False)
+    engine = QwenEngine()
+
+    class BrokenModel:
+        def generate_custom_voice(self, **kwargs):
+            raise RuntimeError("CUDA out of memory while allocating tensor")
+
+    engine._model = BrokenModel()
+    engine._model_id = "qwen3-tts-1.7b-customvoice"
+    monkeypatch.setattr(engine, "_load", lambda model_id: None)
+    unloads = []
+
+    def unload():
+        unloads.append(True)
+        engine._model = None
+        engine._model_id = None
+
+    monkeypatch.setattr(engine, "_unload_locked", unload)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        engine.generate("qwen3-tts-1.7b-customvoice", "Hello")
+    assert not engine.loaded
+    assert len(unloads) == 1
