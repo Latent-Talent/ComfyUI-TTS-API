@@ -51,7 +51,7 @@ In **Server → Model-specific defaults**, selecting any model shows only settin
 - **Qwen3-TTS:** voice, audio format, playback speed, seed, and language; delivery instructions are exposed only on checkpoints that support them.
 - **IndexTTS 2.5:** voice, audio format, speed, seed, language, emotion source, emotion description, eight-value vector, emotion strength, emotion-reference voice, and duration factor.
 
-The Server tab shows **context-sensitive inputs**: selecting IndexTTS emotion mode `text` reveals an emotion description, `vector` reveals eight sliders/values, `reference` reveals an emotion audio selector, while `neutral` hides all emotion-specific inputs. Audio-reference fields offer a **saved recording selector and a native local audio file picker** rather than a manually typed path. Selecting a new file requires confirmation of permission to use that recording. Clicking **Save defaults** uploads it through the existing Voice Clone API and saves its registered voice ID; the model profile does not contain raw audio or local file paths. The Test tab also accepts local character and emotion reference audio files.
+The Server tab shows **context-sensitive inputs**: selecting IndexTTS emotion mode `text` reveals an emotion description, `vector` reveals eight sliders/values, `reference` reveals a saved emotion voice selector, while `neutral` hides emotion-specific inputs. Default-voice selectors use existing voices; to add one, open **Voices → Clone voice from recording**. The Test tab uses saved character voices and supports a separate optional IndexTTS emotion-reference upload.
 
 Click **Save defaults** to persist that model's settings, or **Restore model defaults** to reset just that model to its original values. Defaults take effect on new API requests immediately, without restarting ComfyUI or the TTS worker. **Explicit request fields override saved defaults**, including values like `seed: null` or an empty `instructions` string. The Test tab loads saved defaults when its selected model changes; it always requests WAV audio for local playback.
 
@@ -183,6 +183,8 @@ curl -fS http://127.0.0.1:8025/api/voices/clone \
 ~~~
 
 Use only recordings you have permission to clone.
+
+In **Voices → Clone voice from recording**, choose an audio file or click **Record voice** to capture speech from a microphone. Click **Stop recording** to convert the capture into a 24 kHz mono WAV locally, preview it, optionally discard and retake it, and then click **Save cloned voice**. Recording requires microphone permission and a secure browser context (HTTPS or `localhost`; plain HTTP on a LAN IP is not eligible). Capture stops when leaving the Voices tab or hiding the browser page, and no microphone audio is uploaded until **Save cloned voice** is clicked.
 
 The **Voices** sidebar tab now includes a searchable voice library. Click **View / Edit** on any saved voice to inspect its ID, description, reference transcript and listen to its existing reference audio. Edit metadata or select a replacement audio file (with permission confirmation) and click **Save voice changes**. The voice ID does not change, so existing SillyTavern assignments and model-default references remain valid. **Use in Test** chooses the voice in the Test tab. Delete warns when a model default references that voice. Reference audio is fetched only when requested, through the authenticated same-origin gateway; no voice data is embedded in queue entries or operational logs.
 
