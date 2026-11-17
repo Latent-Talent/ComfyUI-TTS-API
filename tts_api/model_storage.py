@@ -1,8 +1,8 @@
 """Centralized TTS checkpoint paths, independent of voice recordings.
 
 All *new* model downloads, including Hugging Face hub and IndexTTS auxiliary
-checkpoints, are rooted under ComfyUI/models/TTS. Existing legacy HF caches
-remain untouched unless the user explicitly runs migrate-model-cache.sh.
+checkpoints, are rooted under ComfyUI/models/TTS. The service never searches, copies, or moves old model caches. Only the
+explicitly user-run move-tts-models.sh script relocates previous downloads.
 """
 from __future__ import annotations
 
