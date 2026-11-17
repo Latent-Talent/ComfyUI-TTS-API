@@ -116,6 +116,15 @@ function template() {
           <summary>Clone voice from recording</summary>
           <label>Name<input data-clone-name type="text" maxlength="120" placeholder="Character name"></label>
           <label>Reference audio<input data-clone-file type="file" accept="audio/*,.wav,.flac,.ogg,.mp3"></label>
+          <div class="tts-record-controls">
+            <span class="tts-muted">Or record with your microphone</span>
+            <div class="tts-actions">
+              <button type="button" data-action="clone-record">Record voice</button>
+              <button type="button" data-action="clone-discard" hidden>Discard recording</button>
+            </div>
+            <small class="tts-muted" data-clone-record-status role="status" aria-live="polite"></small>
+            <audio data-clone-record-preview controls preload="metadata" hidden aria-label="Recorded voice preview"></audio>
+          </div>
           <label>Reference transcript (optional)<textarea data-clone-transcript rows="2"></textarea></label>
           <label class="tts-check"><input data-clone-consent type="checkbox"> I have permission to use this voice.</label>
           <button type="button" class="tts-primary" data-action="clone">Save cloned voice</button>
@@ -191,6 +200,60 @@ function template() {
     </section>`;
 }
 
+// Browser recorders typically produce Opus/AAC, while the voice API accepts WAV.
+// Decode and resample locally to mono PCM-16 before using the existing clone API.
+async function recordedAudioToWav(blob) {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!Context || !OfflineContext) {
+        throw new Error("This browser cannot convert microphone recordings to WAV.");
+    }
+    const context = new Context();
+    let decoded;
+    try {
+        decoded = await context.decodeAudioData(await blob.arrayBuffer());
+    } finally {
+        await context.close();
+    }
+    if (!Number.isFinite(decoded.duration) || decoded.duration < 0.3 ||
+        decoded.duration > 120) {
+        throw new Error("Record between 0.3 and 120 seconds of audio.");
+    }
+    const sampleRate = 24000;
+    const frames = Math.ceil(decoded.duration * sampleRate);
+    const offline = new OfflineContext(1, frames, sampleRate);
+    const source = offline.createBufferSource();
+    source.buffer = decoded;
+    source.connect(offline.destination);
+    source.start();
+    const rendered = await offline.startRendering();
+    const samples = rendered.getChannelData(0);
+    const wav = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(wav);
+    const ascii = (offset, value) => {
+        for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+    };
+    ascii(0, "RIFF");
+    view.setUint32(4, 36 + samples.length * 2, true);
+    ascii(8, "WAVE");
+    ascii(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // uncompressed PCM
+    view.setUint16(22, 1, true); // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    ascii(36, "data");
+    view.setUint32(40, samples.length * 2, true);
+    for (let i = 0; i < samples.length; i++) {
+        const value = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(44 + 2 * i, value < 0
+            ? Math.round(value * 32768) : Math.round(value * 32767), true);
+    }
+    return new File([wav], "microphone-recording.wav", {type: "audio/wav"});
+}
+
 function mount(container) {
     if (activePanel) activePanel.destroy();
     container.innerHTML = template();
@@ -211,6 +274,17 @@ function mount(container) {
     const qwenSpeakers = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric",
                           "Ryan", "Aiden", "Ono_Anna", "Sohee"];
     const $ = (selector) => root.querySelector(selector);
+    let cloneRecorder = null;
+    let cloneStream = null;
+    let cloneRecordingFile = null;
+    let cloneRecordingURL = null;
+    let cloneRecordingSession = 0;
+    let cloneRequestingMic = false;
+    let cloneEncoding = false;
+    let cloneSaving = false;
+    let cloneStartTime = 0;
+    let cloneDurationTimer = null;
+    let cloneLimitTimer = null;
 
     function feedback(message, isError = false) {
         if (destroyed) return;
@@ -219,7 +293,178 @@ function mount(container) {
         element.textContent = message || "";
         element.classList.toggle("is-error", isError);
     }
+    function setCloneRecordingStatus(message) {
+        $("[data-clone-record-status]").textContent = message;
+    }
+
+    function updateCloneRecordingControls() {
+        const recording = cloneRecorder?.state === "recording";
+        const busy = cloneRequestingMic || cloneEncoding;
+        const recordButton = $("[data-action=clone-record]");
+        recordButton.textContent = recording ? "Stop recording"
+            : cloneRequestingMic ? "Opening microphone…"
+            : cloneEncoding ? "Preparing WAV…" : "Record voice";
+        recordButton.disabled = (busy && !recording) || cloneSaving;
+        $("[data-action=clone-discard]").hidden = !cloneRecordingFile;
+        $("[data-action=clone-discard]").disabled = busy || cloneSaving;
+        $("[data-action=clone]").disabled = recording || busy || cloneSaving;
+        $("[data-clone-file]").disabled = recording || busy || cloneSaving;
+        $("[data-clone-record-preview]").hidden = !cloneRecordingFile;
+    }
+
+    function clearCloneTimers() {
+        if (cloneDurationTimer !== null) window.clearInterval(cloneDurationTimer);
+        if (cloneLimitTimer !== null) window.clearTimeout(cloneLimitTimer);
+        cloneDurationTimer = null;
+        cloneLimitTimer = null;
+    }
+
+    function releaseCloneMicrophone() {
+        if (cloneStream) {
+            cloneStream.getTracks().forEach((track) => track.stop());
+            cloneStream = null;
+        }
+    }
+
+    function discardCloneRecording() {
+        cloneRecordingFile = null;
+        const player = $("[data-clone-record-preview]");
+        player.pause();
+        player.removeAttribute("src");
+        player.load();
+        if (cloneRecordingURL) URL.revokeObjectURL(cloneRecordingURL);
+        cloneRecordingURL = null;
+        updateCloneRecordingControls();
+    }
+
+    function cancelCloneCapture() {
+        cloneRecordingSession++;
+        clearCloneTimers();
+        if (cloneRecorder) {
+            cloneRecorder.ondataavailable = null;
+            cloneRecorder.onstop = null;
+            cloneRecorder.onerror = null;
+            if (cloneRecorder.state !== "inactive") {
+                try { cloneRecorder.stop(); } catch (_) { /* Already stopped. */ }
+            }
+            cloneRecorder = null;
+        }
+        releaseCloneMicrophone();
+        cloneRequestingMic = false;
+        cloneEncoding = false;
+        if (!destroyed) updateCloneRecordingControls();
+    }
+
+    function stopCloneRecording() {
+        if (!cloneRecorder || cloneRecorder.state !== "recording") return;
+        clearCloneTimers();
+        cloneEncoding = true;
+        setCloneRecordingStatus("Processing microphone audio…");
+        cloneRecorder.stop();
+        updateCloneRecordingControls();
+    }
+
+    async function startCloneRecording() {
+        if (cloneRequestingMic || cloneEncoding || cloneSaving || cloneRecorder) return;
+        if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+            throw new Error("Microphone recording requires HTTPS or localhost. On a LAN IP, use HTTPS.");
+        }
+        if (!window.MediaRecorder) {
+            throw new Error("Microphone recording is not supported by this browser.");
+        }
+        const session = ++cloneRecordingSession;
+        cloneRequestingMic = true;
+        setCloneRecordingStatus("Requesting microphone permission…");
+        updateCloneRecordingControls();
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({
+                audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true},
+                video: false,
+            });
+            if (destroyed || session !== cloneRecordingSession) {
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+            }
+            const types = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"];
+            const mimeType = types.find((type) => MediaRecorder.isTypeSupported(type));
+            const recorder = new MediaRecorder(stream, mimeType ? {mimeType} : undefined);
+            const chunks = [];
+            recorder.ondataavailable = (event) => {
+                if (event.data?.size) chunks.push(event.data);
+            };
+            recorder.onerror = () => {
+                if (session !== cloneRecordingSession || destroyed) return;
+                cancelCloneCapture();
+                setCloneRecordingStatus("Microphone recording failed. Try again.");
+            };
+            recorder.onstop = async () => {
+                if (destroyed || session !== cloneRecordingSession) return;
+                clearCloneTimers();
+                releaseCloneMicrophone();
+                cloneRecorder = null;
+                try {
+                    const wav = await recordedAudioToWav(new Blob(chunks, {
+                        type: recorder.mimeType || "audio/webm",
+                    }));
+                    if (destroyed || session !== cloneRecordingSession) return;
+                    if (wav.size > 20 * 1024 * 1024) {
+                        throw new Error("Recording exceeds the 20 MB upload limit.");
+                    }
+                    discardCloneRecording();
+                    cloneRecordingFile = wav;
+                    cloneRecordingURL = URL.createObjectURL(wav);
+                    const player = $("[data-clone-record-preview]");
+                    player.src = cloneRecordingURL;
+                    setCloneRecordingStatus("Recording ready. Preview it, then save the voice.");
+                } catch (error) {
+                    if (destroyed || session !== cloneRecordingSession) return;
+                    setCloneRecordingStatus("Unable to prepare recording: " + error.message);
+                } finally {
+                    if (!destroyed && session === cloneRecordingSession) {
+                        cloneEncoding = false;
+                        updateCloneRecordingControls();
+                    }
+                }
+            };
+            recorder.start();
+            cloneRecorder = recorder;
+            cloneStream = stream;
+            $("[data-clone-file]").value = "";
+            discardCloneRecording();
+            cloneStartTime = Date.now();
+            setCloneRecordingStatus("Recording… 0 seconds");
+            cloneDurationTimer = window.setInterval(() => {
+                if (session !== cloneRecordingSession || destroyed) return;
+                const seconds = Math.floor((Date.now() - cloneStartTime) / 1000);
+                setCloneRecordingStatus("Recording… " + seconds + " seconds (119 max)");
+            }, 1000);
+            cloneLimitTimer = window.setTimeout(() => {
+                if (session === cloneRecordingSession && !destroyed) stopCloneRecording();
+            }, 119000);
+        } catch (error) {
+            if (stream) stream.getTracks().forEach((track) => track.stop());
+            if (session === cloneRecordingSession) {
+                cancelCloneCapture();
+                setCloneRecordingStatus(error.name === "NotAllowedError"
+                    ? "Microphone permission denied. Allow access in your browser and retry."
+                    : error.name === "NotFoundError"
+                    ? "No microphone found. Connect one and retry."
+                    : error.message || "Could not start microphone recording.");
+            }
+        } finally {
+            if (session === cloneRecordingSession && !destroyed) {
+                cloneRequestingMic = false;
+                updateCloneRecordingControls();
+            }
+        }
+    }
+
     function activeTab(name) {
+        if (name !== "voices" && (cloneRecorder || cloneRequestingMic || cloneEncoding)) {
+            cancelCloneCapture();
+            setCloneRecordingStatus("Recording canceled because the Voices tab was closed.");
+        }
         root.querySelectorAll("[data-tab]").forEach((tab) =>
             tab.classList.toggle("is-active", tab.dataset.tab === name));
         root.querySelectorAll("[data-panel]").forEach((panel) =>
@@ -1091,21 +1336,65 @@ function mount(container) {
             activeTab("test");
         }, "Voice created."));
 
+    $("[data-action=clone-record]").addEventListener("click", () => {
+        if (cloneRecorder?.state === "recording") {
+            stopCloneRecording();
+        } else {
+            startCloneRecording().catch((error) =>
+                setCloneRecordingStatus(error.message || "Could not access microphone."));
+        }
+    });
+    $("[data-action=clone-discard]").addEventListener("click", () => {
+        discardCloneRecording();
+        setCloneRecordingStatus("Recording discarded.");
+    });
+    $("[data-clone-file]").addEventListener("change", () => {
+        if ($("[data-clone-file]").files.length) {
+            discardCloneRecording();
+            setCloneRecordingStatus("");
+        }
+    });
+    const onCloneVisibilityChange = () => {
+        if (document.visibilityState === "hidden" &&
+            (cloneRecorder || cloneRequestingMic || cloneEncoding)) {
+            cancelCloneCapture();
+            setCloneRecordingStatus("Recording canceled when the browser tab was hidden.");
+        }
+    };
+    document.addEventListener("visibilitychange", onCloneVisibilityChange);
+    updateCloneRecordingControls();
+
     $("[data-action=clone]").addEventListener("click", (e) => perform(
         e.currentTarget,
         async () => {
-            const file = $("[data-clone-file]").files[0];
-            if (!file) throw new Error("Select a reference recording.");
+            if (cloneRecorder || cloneRequestingMic || cloneEncoding) {
+                throw new Error("Stop recording and let the audio finish processing first.");
+            }
+            const file = cloneRecordingFile || $("[data-clone-file]").files[0];
+            if (!file) throw new Error("Choose a reference audio file or record your voice.");
+            const name = $("[data-clone-name]").value.trim();
+            if (!name) throw new Error("Enter a character name.");
             if (!$("[data-clone-consent]").checked) throw new Error("Confirm authorization to use this voice.");
-            const form = new FormData();
-            form.append("name", $("[data-clone-name]").value.trim());
-            form.append("reference_text", $("[data-clone-transcript]").value);
-            form.append("consent", "true");
-            form.append("audio", file);
-            const voice = await (await request("/voices/clone", { method: "POST", body: form })).json();
-            await refreshVoices();
-            $("[data-test-voice]").value = voice.id;
-            activeTab("test");
+            cloneSaving = true;
+            updateCloneRecordingControls();
+            try {
+                const form = new FormData();
+                form.append("name", name);
+                form.append("reference_text", $("[data-clone-transcript]").value);
+                form.append("consent", "true");
+                form.append("audio", file, file.name);
+                const voice = await (await request("/voices/clone", {method: "POST", body: form})).json();
+                discardCloneRecording();
+                $("[data-clone-file]").value = "";
+                $("[data-clone-consent]").checked = false;
+                setCloneRecordingStatus("");
+                await refreshVoices();
+                $("[data-test-voice]").value = voice.id;
+                activeTab("test");
+            } finally {
+                cloneSaving = false;
+                updateCloneRecordingControls();
+            }
         }, "Voice saved."));
 
     $("[data-action=generate]").addEventListener("click", (e) => perform(
@@ -1179,8 +1468,12 @@ function mount(container) {
     activePanel = {
         destroy() {
             destroyed = true;
+            cancelCloneCapture();
+            discardCloneRecording();
+            document.removeEventListener("visibilitychange", onCloneVisibilityChange);
             if (timer) window.clearInterval(timer);
             if (audioURL) URL.revokeObjectURL(audioURL);
+            cleanupVoicePreviews();
         },
     };
 }
