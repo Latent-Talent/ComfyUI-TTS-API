@@ -19,6 +19,7 @@ import numpy as np
 import soundfile as sf
 
 from .operations import emit
+from .comfy_queue import active_request_kind, require_queue_reservation
 
 LOG = logging.getLogger("comfyui-tts-api.engine")
 
@@ -102,7 +103,9 @@ class VoxEngine:
 
     def _load(self) -> None:
         if self._model is None:
-            emit("model.load.started", backend="voxcpm2", model="voxcpm2")
+            require_queue_reservation()
+            emit("model.load.started", backend="voxcpm2", model="voxcpm2",
+                 kind=active_request_kind())
             load_started = time.perf_counter()
             try:
                 from voxcpm import VoxCPM
