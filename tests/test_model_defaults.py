@@ -194,3 +194,62 @@ def test_model_catalog_exposes_downloaded_flag_without_network(monkeypatch):
     assert indexed[INDEX_ID] is True
     assert indexed["qwen3-tts-0.6b-base"] is True
     assert indexed["qwen3-tts-1.7b-base"] is False
+
+
+def test_indextts_dynamic_fields_are_mode_specific():
+    fields = {spec["name"]: spec for spec in schema_for(INDEX_ID)}
+    assert fields["voice"]["kind"] == "audio_voice"
+    assert fields["voice"]["audio_reference"] is True
+    assert fields["emotion_reference_voice"]["kind"] == "audio_voice"
+    assert fields["emotion_reference_voice"]["visible_when"] == {
+        "emotion_mode": ["reference"]
+    }
+    assert fields["emotion_vector"]["visible_when"] == {
+        "emotion_mode": ["vector"]
+    }
+    assert fields["instructions"]["visible_when"] == {
+        "emotion_mode": ["text"]
+    }
+    assert fields["emotion_strength"]["visible_when"] == {
+        "emotion_mode": ["auto", "text", "vector", "reference"]
+    }
+    assert "visible_when" not in fields["duration_factor"]
+    assert "voice" not in builtins_for("qwen3-tts-1.7b-voicedesign")
+    assert fields["emotion_reference_voice"]["required_saved_voice"] is True
+
+
+def test_audio_fields_store_voice_ids_not_file_contents(tmp_path):
+    values = save_defaults(tmp_path, INDEX_ID, {
+        "voice": "voice_0123456789abcdef",
+        "emotion_reference_voice": "voice_abcdef0123456789",
+        "emotion_mode": "reference",
+    })
+    assert values["voice"] == "voice_0123456789abcdef"
+    assert values["emotion_reference_voice"] == "voice_abcdef0123456789"
+    stored = (tmp_path / "model_defaults.json").read_text()
+    assert "voice_0123456789abcdef" in stored
+    assert '"emotion_mode": "reference"' in stored
+    assert '"audio"' not in stored
+
+
+def test_indextts_explicit_neutral_cannot_be_overridden_by_hidden_description(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    save_defaults(tmp_path, INDEX_ID, {
+        "emotion_mode": "neutral", "instructions": "An earlier angry style",
+    })
+    inferred = server.apply_speech_defaults(
+        server.SpeechRequest(model=INDEX_ID, input="Sample")
+    )
+    assert inferred.emotion_mode == "neutral"
+    assert inferred.instructions == "An earlier angry style"
+
+    explicit = server.apply_speech_defaults(server.SpeechRequest(
+        model=INDEX_ID, input="Sample", emotion_mode="neutral",
+        instructions="This should not override neutral",
+    ))
+    assert explicit.emotion_mode == "neutral"
+    legacy = server.apply_speech_defaults(server.SpeechRequest(
+        model=INDEX_ID, input="Sample", instructions="Speak softly",
+    ))
+    assert legacy.emotion_mode == "text"
