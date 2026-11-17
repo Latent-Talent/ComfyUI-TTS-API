@@ -423,6 +423,9 @@ function mount(container) {
                     control.add(new Option(text, choice));
                 });
                 control.value = String(value);
+                if (spec.name === "emotion_mode") {
+                    control.addEventListener("change", updateDefaultFieldVisibility);
+                }
             } else if (spec.kind === "textarea") {
                 control = document.createElement("textarea");
                 control.rows = 2;
@@ -451,7 +454,6 @@ function mount(container) {
         }
         // Use visibility instead of rebuilding when changing emotion mode:
         // values for hidden modes remain intact while exploring the menu.
-        target.addEventListener("change", updateDefaultFieldVisibility, {once: true});
         updateDefaultFieldVisibility();
     }
 
@@ -563,7 +565,7 @@ function mount(container) {
         const data = await (await request("/models/defaults")).json();
         if (destroyed) return;
         defaultsByModel = data.models || {};
-        renderModelDefaults();
+        renderModelDefaults(true);
         applyTestDefaults();
     }
 
@@ -670,6 +672,8 @@ function mount(container) {
     async function refreshVoices() {
         const voices = await (await request("/voices")).json();
         if (destroyed) return;
+        savedVoices = voices;
+        refreshDefaultVoiceOptions();
         const list = $("[data-voices]");
         list.replaceChildren();
         const select = $("[data-test-voice]");
@@ -783,12 +787,14 @@ function mount(container) {
     $("[data-action=save-model-defaults]").addEventListener("click", (e) => perform(
         e.currentTarget, async () => {
             const payload = readModelDefaults();
+            await uploadPendingDefaultAudio(payload);
             const response = await (await request("/models/defaults", {
                 method: "POST", headers: {"Content-Type": "application/json"},
                 body: JSON.stringify(payload),
             })).json();
             defaultsByModel[payload.model_id].values = response.settings;
-            renderModelDefaults();
+            renderModelDefaults(true);
+            await refreshVoices();
             if ($("[data-test-model]").value === payload.model_id) applyTestDefaults();
         }, "Defaults saved for this model. New API requests use them unless explicitly overridden."
     ));
@@ -800,7 +806,10 @@ function mount(container) {
                 body: JSON.stringify({model_id: modelId, settings: {}, reset: true}),
             })).json();
             defaultsByModel[modelId].values = response.settings;
-            renderModelDefaults();
+            for (const key of pendingAudio.keys()) {
+                if (key.startsWith(modelId + ":")) pendingAudio.delete(key);
+            }
+            renderModelDefaults(true);
             if ($("[data-test-model]").value === modelId) applyTestDefaults();
         }, "Built-in defaults restored for this model."
     ));
