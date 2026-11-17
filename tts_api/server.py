@@ -44,6 +44,9 @@ ACTIVE_MODEL = canonical_model(
 )
 INFERENCE_LOCK = threading.RLock()
 
+DOWNLOAD_LOCK = threading.RLock()
+DOWNLOAD_STATUS = {"state": "idle", "model_id": None, "error": None}
+
 KEY = os.getenv("TTS_API_KEY", "")
 MAX_TEXT = int(os.getenv("TTS_MAX_TEXT", "12000"))
 MAX_UPLOAD = int(os.getenv("TTS_MAX_UPLOAD_MB", "20")) * 1024 * 1024
@@ -283,13 +286,71 @@ async def voices():
 
 @app.get("/api/models", dependencies=[Depends(authenticate)])
 async def list_models():
+    models = model_catalog()
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        for record in models:
+            if "repo" in record:
+                cached = try_to_load_from_cache(record["repo"], "config.json")
+                record["cache_detected"] = isinstance(cached, str)
+    except ImportError:
+        pass
     return {
         "active_model": ACTIVE_MODEL,
-        "models": model_catalog(),
+        "models": models,
         "qwen_installed": importlib.util.find_spec("qwen_tts") is not None,
         "loaded_model": QWEN_ENGINE.loaded_model if QWEN_ENGINE.loaded
                         else (VOX_ID if ENGINE.loaded else None),
     }
+
+
+class ModelDownloadRequest(BaseModel):
+    model_id: str
+
+
+def _download_model(model_id: str) -> None:
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(QWEN_MODELS[model_id]["repo"])
+    except Exception as exc:
+        LOG.exception("[TTS API] Download failed for %s", model_id)
+        with DOWNLOAD_LOCK:
+            DOWNLOAD_STATUS.update({
+                "state": "failed", "model_id": model_id,
+                "error": str(exc)[:500],
+            })
+    else:
+        with DOWNLOAD_LOCK:
+            DOWNLOAD_STATUS.update({
+                "state": "complete", "model_id": model_id, "error": None,
+            })
+
+
+@app.post("/api/models/download", dependencies=[Depends(authenticate)])
+async def download_model(request: ModelDownloadRequest):
+    if request.model_id not in QWEN_MODELS:
+        raise HTTPException(422, "Select one of the supported Qwen model IDs")
+    with DOWNLOAD_LOCK:
+        if DOWNLOAD_STATUS["state"] == "downloading":
+            raise HTTPException(
+                409,
+                f"Downloading {DOWNLOAD_STATUS['model_id']} already",
+            )
+        DOWNLOAD_STATUS.update({
+            "state": "downloading", "model_id": request.model_id,
+            "error": None,
+        })
+        threading.Thread(
+            target=_download_model, args=(request.model_id,),
+            name="TTS-Qwen-HF-Download", daemon=True,
+        ).start()
+        return dict(DOWNLOAD_STATUS)
+
+
+@app.get("/api/models/download/status", dependencies=[Depends(authenticate)])
+async def model_download_status():
+    with DOWNLOAD_LOCK:
+        return dict(DOWNLOAD_STATUS)
 
 
 @app.post("/v1/audio/speech", dependencies=[Depends(authenticate)])
