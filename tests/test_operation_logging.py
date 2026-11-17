@@ -1,0 +1,120 @@
+"""Operational logging must never copy speech content or credentials."""
+from __future__ import annotations
+
+import io
+import json
+import os
+import stat
+
+from fastapi.testclient import TestClient
+import numpy as np
+import pytest
+import soundfile as sf
+
+from tts_api import operations, server
+
+
+def fake_wav():
+    out = io.BytesIO()
+    sf.write(out, np.zeros(2400, dtype=np.float32), 48000, format="WAV")
+    return out.getvalue()
+
+
+@pytest.fixture
+def activity_log(tmp_path, monkeypatch):
+    # Restore process-wide log destination at the end of each test.
+    monkeypatch.setattr(operations, "_FILE", None)
+    operations.configure(tmp_path)
+    return tmp_path / "operations.log"
+
+
+def test_log_allowlist_discards_text_and_arbitrary_metadata(activity_log):
+    private = "PERSONAL-SPOKEN-WORDS-ARE-NOT-FOR-LOGS"
+    operation = operations.emit(
+        "generation.started",
+        model="voxcpm2", backend="voxcpm2",
+        characters=27, has_reference=True,
+        text=private, transcript=private, instructions=private,
+        voice_description=private, error=private, path=private,
+        error_type="RuntimeError",
+    )
+    data = activity_log.read_text(encoding="utf-8")
+    assert private not in data
+    assert "text" not in operation
+    assert "transcript" not in operation
+    assert "instructions" not in operation
+    assert "voice_description" not in operation
+    assert "error" not in operation
+    assert operation["characters"] == 27
+    assert operation["has_reference"] is True
+    assert operation["model"] == "voxcpm2"
+    assert operation["error_type"] == "RuntimeError"
+    if os.name == "posix":
+        assert stat.S_IMODE(activity_log.stat().st_mode) == 0o600
+
+
+def test_unknown_event_and_model_identifiers_cannot_log_untrusted_text(activity_log):
+    secret = "HIDDEN VOICE INSTRUCTION"
+    with pytest.raises(ValueError, match="Unknown TTS operational event"):
+        operations.emit(secret, text=secret)
+    event = operations.emit("request.started", model=secret,
+                            backend=secret, error_type=secret, status=secret)
+    assert "model" not in event
+    assert "backend" not in event
+    assert "error_type" not in event
+    assert "status" not in event
+    assert secret not in activity_log.read_text()
+
+
+def test_log_history_persists_and_truncates_to_requested_limit(activity_log):
+    for i in range(4):
+        operations.emit("model.load.started", model="voxcpm2", characters=i)
+    assert [i["characters"] for i in operations.recent(2)] == [2, 3]
+    assert len(operations.recent(200)) == 4
+
+
+def test_operations_endpoint_redacts_text_and_returns_model_progress(activity_log, monkeypatch, tmp_path):
+    private = "SPEAK-THIS-WORD-FOR-WORD-NEVER-LOG-IT"
+    monkeypatch.setattr(server, "STORE", server.VoiceStore(tmp_path / "voices"))
+    monkeypatch.setattr(server, "_render", lambda request: fake_wav())
+    result = TestClient(server.app).post("/v1/audio/speech", json={
+        "model": "voxcpm2", "input": private, "voice": "default",
+        "response_format": "wav",
+        "instructions": "DELICATE-DELIVERY-CONTENT-DO-NOT-LOG",
+    })
+    assert result.status_code == 200
+    events = TestClient(server.app).get("/api/operations?limit=100")
+    assert events.status_code == 200
+    assert events.json()["text_logged"] is False
+    history = events.json()["events"]
+    assert any(x["event"] == "request.started" for x in history)
+    assert any(x["event"] == "request.completed" for x in history)
+    starts = [x for x in history if x["event"] == "request.started"]
+    completions = [x for x in history if x["event"] == "request.completed"]
+    assert starts[-1]["request_id"] == completions[-1]["request_id"]
+    assert private not in activity_log.read_text()
+    assert "DELICATE-DELIVERY-CONTENT" not in activity_log.read_text()
+
+
+def test_failed_request_has_safe_status_not_backend_error_text(activity_log, monkeypatch):
+    private = "THE-PRIVATE-INPUT-WAS-IN-EXCEPTION"
+    def fail(_request):
+        raise RuntimeError(private)
+    monkeypatch.setattr(server, "_render", fail)
+    response = TestClient(server.app).post("/v1/audio/speech", json={
+        "model": "voxcpm2", "input": private, "response_format": "wav",
+    })
+    assert response.status_code == 503
+    data = activity_log.read_text()
+    assert private not in data
+    events = operations.recent(100)
+    assert any(entry["event"] == "request.failed" for entry in events)
+
+
+def test_log_file_rotation_is_bounded(activity_log, monkeypatch):
+    monkeypatch.setattr(operations, "MAX_BYTES", 300)
+    for _ in range(40):
+        operations.emit("model.load.started", model="voxcpm2")
+    assert activity_log.stat().st_size <= 300
+    assert (activity_log.parent / "operations.log.1").exists()
+    assert len(list(activity_log.parent.glob("operations.log*"))) <= 3
