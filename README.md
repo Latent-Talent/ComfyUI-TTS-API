@@ -41,7 +41,17 @@ The core installer creates `ComfyUI-TTS-API/.venv`. VoxCPM2 is included and is t
 | `qwen3-tts-1.7b-base` / `qwen3-tts-0.6b-base` | Clone speech from saved reference audio | `install-qwen.sh` |
 | `indextts-2.5` | Reference-audio voice cloning and emotion controls | `install-index.sh` |
 
-**Model selection:** Use **Server → Speech model** to choose a backend, **Download model weights** for Qwen or IndexTTS, and **Make API default** to set the model used by aliases such as `tts-1`. The **Test** tab can use a different backend without changing the default. Models load on demand.
+**Model selection:** Use **Server → Speech model** to choose a backend and **Make API default** to set the model used by aliases such as `tts-1`. The **Download model weights** button is shown only when the selected Qwen or IndexTTS checkpoint is not fully downloaded; it disappears when the local weights are present. The **Test** tab can select another backend without changing the API default. Models load on demand.
+
+### Per-model defaults
+
+In **Server → Model-specific defaults**, selecting any model shows only settings supported by that checkpoint. Each model saves its own profile in `data/model_defaults.json` (file permissions 0600), so changing the default model does not overwrite another model's settings.
+
+- **VoxCPM2:** voice, audio format, playback speed, seed, delivery instructions, inference steps, and CFG.
+- **Qwen3-TTS:** voice, audio format, playback speed, seed, and language; delivery instructions are exposed only on checkpoints that support them.
+- **IndexTTS 2.5:** voice, audio format, speed, seed, language, emotion source, emotion description, eight-value vector, emotion strength, emotion-reference voice, and duration factor.
+
+Click **Save defaults** to persist that model's settings, or **Restore model defaults** to reset just that model to its original values. Defaults take effect on new API requests immediately, without restarting ComfyUI or the TTS worker. **Explicit request fields override saved defaults**, including values like `seed: null` or an empty `instructions` string. The Test tab loads saved defaults when its selected model changes; it always requests WAV audio for local playback.
 
 ### Qwen3-TTS
 
