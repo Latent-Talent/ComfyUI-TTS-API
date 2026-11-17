@@ -277,6 +277,15 @@ class ManagedTTS:
         environment["PYTORCH_CUDA_ALLOC_CONF"] = "backend:native"
         environment["TTS_CONTROL_TOKEN"] = self.control_token
         environment["TTS_PARENT_PID"] = str(os.getpid())
+        # The worker uses a private loopback control bridge to reserve a real
+        # ComfyUI queue position before loading TTS weights or generating.
+        try:
+            from comfy.cli_args import args as comfy_args
+            scheme = "https" if getattr(comfy_args, "tls_certfile", None) else "http"
+            port = int(getattr(comfy_args, "port", 8188))
+        except (ImportError, AttributeError, ValueError, TypeError):
+            scheme, port = "http", 8188
+        environment["TTS_COMFY_QUEUE_URL"] = f"{scheme}://127.0.0.1:{port}/tts-api/queue"
         environment["TTS_DATA_DIR"] = str(data_dir) if "TTS_DATA_DIR" not in self.config else self.config["TTS_DATA_DIR"]
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         kwargs = {"cwd": str(self.root), "env": environment,
@@ -329,6 +338,11 @@ class ManagedTTS:
         self._owns_child = False
 
     def start(self):
+        try:
+            from .queue_bridge import BROKER
+            BROKER.configure(self)
+        except ImportError:
+            pass
         with self._lock:
             # Skip events from prior ComfyUI sessions, but retain new events
             # written immediately after the managed worker is spawned.
@@ -356,6 +370,23 @@ class ManagedTTS:
             running, pending = server.prompt_queue.get_current_queue_volatile()
             return bool(running or pending)
         except (ImportError, AttributeError, RuntimeError):
+            return False
+
+    def _queue_has_real_running(self):
+        """Only currently executing *non-TTS* prompts require preemption."""
+        try:
+            from server import PromptServer
+            server = PromptServer.instance
+            if server is None or server.prompt_queue is None:
+                return False
+            running, _ = server.prompt_queue.get_current_queue_volatile()
+            return any(not (
+                isinstance(item[2], dict)
+                and any(isinstance(node, dict)
+                        and node.get("class_type") == "LatentTalentTTSQueueSlot"
+                        for node in item[2].values())
+            ) for item in running)
+        except (ImportError, AttributeError, RuntimeError, IndexError, TypeError):
             return False
 
     def _relay_events(self):
@@ -434,7 +465,18 @@ class ManagedTTS:
             with self._lock:
                 if self._disabled:
                     continue
-                busy = self._queue_busy()
+                # A running TTS reservation IS the active ComfyUI workflow.
+                # Other pending prompts must wait for its queue slot to finish.
+                try:
+                    from .queue_bridge import BROKER
+                    tts_active = BROKER.active()
+                    tts_queued = BROKER.outstanding()
+                except ImportError:
+                    tts_active = tts_queued = False
+                busy = not tts_active and (
+                    self._queue_has_real_running() or
+                    (not tts_queued and self._queue_busy())
+                )
                 if busy and not self._reserved:
                     self._reserved = True
                     self._hold_until = time.monotonic() + 1
@@ -455,6 +497,14 @@ class ManagedTTS:
             self._terminate()
 
     def reserve_for_comfy(self):
+        try:
+            from .queue_bridge import BROKER
+            if BROKER.outstanding() and not self._queue_has_real_running():
+                # TTS is already ahead in the actual queue. Do not kill its
+                # HTTP worker just because another job was submitted behind it.
+                return
+        except ImportError:
+            pass
         with self._lock:
             self._reserved = True
             self._hold_until = time.monotonic() + 2.0
