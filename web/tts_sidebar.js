@@ -60,6 +60,15 @@ function template() {
         </div>
         <p class="tts-hint" data-model-hint>Models load on demand. Switching the default restarts only the managed TTS API, not ComfyUI.</p>
         <p class="tts-hint" data-download-status>No model download active.</p>
+        <div class="tts-section-title">Model-specific defaults</div>
+        <p class="tts-hint">Saved separately for each model. They apply when the API request omits a setting; explicit request values take priority.</p>
+        <div class="tts-defaults-fields" data-model-defaults-fields>
+          <p class="tts-muted">Loading model settings…</p>
+        </div>
+        <div class="tts-actions">
+          <button type="button" class="tts-primary" data-action="save-model-defaults">Save defaults</button>
+          <button type="button" data-action="reset-model-defaults">Restore model defaults</button>
+        </div>
         <div class="tts-section-title">Connection</div>
         <div class="tts-endpoint">
           <code data-endpoint>http://127.0.0.1:8025/v1/audio/speech</code>
@@ -179,6 +188,9 @@ function mount(container) {
     let destroyed = false;
     let modelList = [{ id: "voxcpm2", label: "VoxCPM2", kind: "voxcpm" }];
     let modelChoicesInitialized = false;
+    let defaultsByModel = {};
+    let downloadStatus = null;
+    let latestCompletedDownload = null;
     const emotionNames = ["happy", "angry", "sad", "afraid", "disgusted",
                           "melancholic", "surprised", "calm"];
     const qwenSpeakers = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric",
@@ -226,16 +238,22 @@ function mount(container) {
         modelChoicesInitialized = true;
         updateTestModelNote();
         updateModelDownloadButton();
+        renderModelDefaults();
         refreshVoices().catch(() => {});
     }
 
     function updateModelDownloadButton() {
         const id = $("[data-selected-model]").value;
         const button = $("[data-action=download-model]");
-        button.disabled = id === "voxcpm2";
-        button.textContent = id === "indextts-2.5"
-            ? "Download IndexTTS 2.5 weights" : id.startsWith("qwen3-tts")
-                ? "Download Qwen weights" : "Weights managed by VoxCPM";
+        const model = modelList.find((entry) => entry.id === id);
+        const available = id === "voxcpm2" || model?.cache_detected === true;
+        const downloading = downloadStatus?.state === "downloading";
+        button.hidden = available;
+        button.disabled = downloading;
+        button.textContent = downloading && downloadStatus.model_id === id
+            ? "Downloading weights…"
+            : id === "indextts-2.5" ? "Download IndexTTS 2.5 weights"
+            : "Download Qwen weights";
     }
 
     function updateEmotionControls() {
@@ -272,6 +290,12 @@ function mount(container) {
     async function refreshDownloadStatus() {
         const status = await (await request("/models/download/status")).json();
         if (destroyed) return;
+        downloadStatus = status;
+        updateModelDownloadButton();
+        if (status.state === "complete" && latestCompletedDownload !== status.model_id) {
+            latestCompletedDownload = status.model_id;
+            refreshModels().catch(() => {});
+        }
         const box = $("[data-download-status]");
         if (status.state === "downloading") box.textContent = "Downloading " + status.model_id + " under models/TTS. Check TTS worker logs for progress.";
         else if (status.state === "complete") box.textContent = "Downloaded: " + status.model_id;
@@ -418,7 +442,10 @@ function mount(container) {
         updateTestModelNote();
         refreshVoices().catch((err) => feedback(err.message, true));
     });
-    $("[data-selected-model]").addEventListener("change", updateModelDownloadButton);
+    $("[data-selected-model]").addEventListener("change", () => {
+        updateModelDownloadButton();
+        renderModelDefaults();
+    });
     $("[data-index-emo-mode]").addEventListener("change", updateEmotionControls);
     updateEmotionControls();
     $("[data-action=apply-model]").addEventListener("click", (e) => perform(
@@ -440,6 +467,7 @@ function mount(container) {
             if (!id.startsWith("qwen3-tts") && id !== "indextts-2.5") {
                 throw new Error("Choose a Qwen3-TTS or IndexTTS model to download.");
             }
+            latestCompletedDownload = null;
             await request("/models/download", {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ model_id: id }),
