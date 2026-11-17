@@ -242,6 +242,162 @@ function mount(container) {
         refreshVoices().catch(() => {});
     }
 
+    function renderModelDefaults() {
+        const target = $("[data-model-defaults-fields]");
+        target.replaceChildren();
+        const selected = $("[data-selected-model]").value;
+        const profile = defaultsByModel[selected];
+        const save = $("[data-action=save-model-defaults]");
+        const reset = $("[data-action=reset-model-defaults]");
+        save.disabled = reset.disabled = !profile;
+        if (!profile) {
+            const info = document.createElement("p");
+            info.className = "tts-muted";
+            info.textContent = "Model settings unavailable while the TTS API is offline.";
+            target.append(info);
+            return;
+        }
+        for (const spec of profile.fields) {
+            const label = document.createElement("label");
+            label.className = "tts-default-field";
+            if (spec.kind === "textarea" || spec.kind === "vector") {
+                label.classList.add("is-wide");
+            }
+            const name = document.createElement("span");
+            name.textContent = spec.label;
+            label.append(name);
+            const value = profile.values[spec.name] ?? spec.default;
+            let control;
+            if (spec.kind === "vector") {
+                control = document.createElement("div");
+                control.dataset.defaultField = spec.name;
+                control.className = "tts-emotion-grid";
+                spec.emotions.forEach((emotion, index) => {
+                    const emotionLabel = document.createElement("label");
+                    emotionLabel.textContent = emotion[0].toUpperCase() + emotion.slice(1);
+                    const input = document.createElement("input");
+                    input.type = "number";
+                    input.min = String(spec.min);
+                    input.max = String(spec.max);
+                    input.step = String(spec.step);
+                    input.dataset.vectorIndex = String(index);
+                    input.value = String(value[index]);
+                    emotionLabel.append(input);
+                    control.append(emotionLabel);
+                });
+            } else if (spec.kind === "select") {
+                control = document.createElement("select");
+                spec.options.forEach((choice) => {
+                    control.add(new Option(choice, choice));
+                });
+                control.value = String(value);
+            } else if (spec.kind === "textarea") {
+                control = document.createElement("textarea");
+                control.rows = 2;
+                control.maxLength = spec.max_length || 1000;
+                control.value = String(value);
+            } else {
+                control = document.createElement("input");
+                control.type = ["integer", "nullable_integer", "number"].includes(spec.kind)
+                    ? "number" : "text";
+                if (spec.min !== undefined) control.min = String(spec.min);
+                if (spec.max !== undefined) control.max = String(spec.max);
+                if (spec.step !== undefined) control.step = String(spec.step);
+                if (spec.max_length !== undefined) control.maxLength = spec.max_length;
+                if (spec.kind === "integer" || spec.kind === "nullable_integer") {
+                    control.step = "1";
+                }
+                control.value = value == null ? "" : String(value);
+            }
+            control.dataset.defaultField = spec.name;
+            label.append(control);
+            if (spec.hint) {
+                const hint = document.createElement("small");
+                hint.className = "tts-muted";
+                hint.textContent = spec.hint;
+                label.append(hint);
+            }
+            target.append(label);
+        }
+    }
+
+    function readModelDefaults() {
+        const modelId = $("[data-selected-model]").value;
+        const profile = defaultsByModel[modelId];
+        if (!profile) throw new Error("Model settings are not available yet.");
+        const values = {};
+        for (const spec of profile.fields) {
+            const input = $("[data-model-defaults-fields]")
+                .querySelector('[data-default-field="' + spec.name + '"]');
+            if (!input) throw new Error("Missing setting: " + spec.label);
+            if (spec.kind === "vector") {
+                values[spec.name] = [...input.querySelectorAll("[data-vector-index]")]
+                    .map((field) => field.value.trim() === "" ? NaN : Number(field.value));
+                if (values[spec.name].some((value) => !Number.isFinite(value))) {
+                    throw new Error("Enter all eight emotion vector values.");
+                }
+            } else if (spec.kind === "nullable_integer" && input.value.trim() === "") {
+                values[spec.name] = null;
+            } else if (spec.kind === "integer" || spec.kind === "nullable_integer" ||
+                       spec.kind === "number") {
+                if (input.value.trim() === "") {
+                    throw new Error("Enter " + spec.label + ".");
+                }
+                values[spec.name] = Number(input.value);
+                if (!Number.isFinite(values[spec.name])) {
+                    throw new Error("Invalid number for " + spec.label + ".");
+                }
+            } else {
+                values[spec.name] = input.value;
+            }
+        }
+        return {model_id: modelId, settings: values};
+    }
+
+    function applyTestDefaults() {
+        const profile = defaultsByModel[$("[data-test-model]").value];
+        if (!profile) return;
+        const values = profile.values;
+        const put = (selector, key) => {
+            if (key in values) {
+                const control = $(selector);
+                if (control) control.value = values[key] == null ? "" : String(values[key]);
+            }
+        };
+        put("[data-test-language]", "language");
+        put("[data-test-seed]", "seed");
+        put("[data-test-steps]", "steps");
+        put("[data-test-delivery]", "instructions");
+        put("[data-index-emo-mode]", "emotion_mode");
+        put("[data-index-emo-strength]", "emotion_strength");
+        put("[data-index-duration]", "duration_factor");
+        if (Array.isArray(values.emotion_vector)) {
+            emotionNames.forEach((name, index) => {
+                const control = root.querySelector('[data-emotion="' + name + '"]');
+                if (control) control.value = String(values.emotion_vector[index]);
+            });
+        }
+        const emotionReference = $("[data-index-emo-reference]");
+        if (values.emotion_reference_voice &&
+            [...emotionReference.options].some((o) => o.value === values.emotion_reference_voice)) {
+            emotionReference.value = values.emotion_reference_voice;
+        }
+        const voice = $("[data-test-voice]");
+        if (values.voice && values.voice !== "default" &&
+            [...voice.options].some((o) => o.value === values.voice)) {
+            voice.value = values.voice;
+        }
+        updateEmotionControls();
+    }
+
+    async function refreshModelDefaults() {
+        const data = await (await request("/models/defaults")).json();
+        if (destroyed) return;
+        defaultsByModel = data.models || {};
+        renderModelDefaults();
+        applyTestDefaults();
+    }
+
     function updateModelDownloadButton() {
         const id = $("[data-selected-model]").value;
         const button = $("[data-action=download-model]");
