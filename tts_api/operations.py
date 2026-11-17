@@ -135,7 +135,7 @@ def recent(limit: int = 100) -> list[dict]:
             if isinstance(event, dict) and event.get("event") in EVENTS:
                 # Revalidate on read to protect against manually edited files.
                 meta = {k: event[k] for k in INT_FIELDS | FLOAT_FIELDS |
-                        BOOL_FIELDS | STRING_FIELDS if k in event}
+                        BOOL_FIELDS | set(STRING_FIELDS) if k in event}
                 filtered = {"time": event.get("time", ""), "event": event["event"]}
                 if isinstance(event.get("request_id"), str) and ID_PATTERN.fullmatch(event["request_id"]):
                     filtered["request_id"] = event["request_id"]
