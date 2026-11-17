@@ -186,4 +186,5 @@ def test_legacy_voice_records_remain_editable(tmp_path):
     )
     assert saved["id"] == voice_id
     assert saved["name"] == "Updated legacy"
-    assert "created_at" not in saved\n    assert "updated_at" in saved
+    assert "created_at" not in saved
+    assert "updated_at" in saved
