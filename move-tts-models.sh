@@ -25,9 +25,9 @@ done
 
 project_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 comfy_dir=$(cd -- "$project_dir/../.." && pwd -P)
-models_dir=\${TTS_MODELS_DIR:-"$comfy_dir/models/TTS"}
+models_dir=${TTS_MODELS_DIR:-"$comfy_dir/models/TTS"}
 target=$(realpath -m -- "$models_dir/huggingface/hub")
-source_cache=\${HF_HUB_CACHE:-"\${HF_HOME:-$HOME/.cache/huggingface}/hub"}
+source_cache=${HF_HUB_CACHE:-"${HF_HOME:-$HOME/.cache/huggingface}/hub"}
 source=$(realpath -m -- "$source_cache")
 index_target=$(realpath -m -- "$models_dir/IndexTTS-2.5/checkpoints")
 
@@ -88,7 +88,7 @@ if [[ -n "$index_source" ]]; then
       exit 1
     fi
     while IFS= read -r -d '' entry; do
-      filename=\${entry##*/}
+      filename=${entry##*/}
       destination="$index_target/$filename"
       if [[ -e "$destination" || -L "$destination" ]]; then
         printf 'SKIP (IndexTTS destination exists): %s\n' "$filename"
