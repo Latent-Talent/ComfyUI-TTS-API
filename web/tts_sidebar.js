@@ -34,16 +34,6 @@ function template() {
         <button type="button" data-tab="test">Test</button>
       </nav>
       <div class="tts-panel" data-panel="server">
-        <div class="tts-section-title">Inference service</div>
-        <div class="tts-info">
-          <div><span>Backend</span><strong data-model>VoxCPM2</strong></div>
-          <div><span>API version</span><strong data-version>Unknown</strong></div>
-          <div><span>API</span><strong data-service>Checking</strong></div>
-          <div><span>Model memory</span><strong data-memory>Not loaded</strong></div>
-          <div><span>CUDA allocator</span><strong data-allocator>Native</strong></div>
-          <div><span>Idle unload</span><strong data-idle>60s</strong></div>
-          <div><span>ComfyUI queue</span><strong data-queue>Checking</strong></div>
-        </div>
         <div class="tts-section-title">Actions</div>
         <div class="tts-actions">
           <button type="button" data-action="refresh">Refresh</button>
@@ -89,6 +79,16 @@ function template() {
         <p class="tts-hint">Existing keys are never displayed. A generated key is shown only now — copy it to SillyTavern. Saving a key immediately restarts the managed API; it does not restart ComfyUI.</p>
         <div class="tts-section-title">Last generation</div>
         <p class="tts-muted" data-bench>No speech generated yet.</p>
+        <div class="tts-section-title">Inference service</div>
+        <div class="tts-info">
+          <div><span>Backend</span><strong data-model>VoxCPM2</strong></div>
+          <div><span>API version</span><strong data-version>Unknown</strong></div>
+          <div><span>API</span><strong data-service>Checking</strong></div>
+          <div><span>Model memory</span><strong data-memory>Not loaded</strong></div>
+          <div><span>CUDA allocator</span><strong data-allocator>Native</strong></div>
+          <div><span>Idle unload</span><strong data-idle>60s</strong></div>
+          <div><span>ComfyUI queue</span><strong data-queue>Checking</strong></div>
+        </div>
       </div>
       <div class="tts-panel" data-panel="voices" hidden>
         <div class="tts-section-title">Saved character voices</div>
