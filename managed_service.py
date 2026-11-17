@@ -68,6 +68,9 @@ class ManagedTTS:
         self.url = f"http://127.0.0.1:{self.port}"
         self._process = None
         self._log_handle = None
+        # Track only our sanitized operations.log, never the raw worker log.
+        self._event_offset = 0
+        self._event_identity = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._monitor = None
@@ -327,6 +330,16 @@ class ManagedTTS:
 
     def start(self):
         with self._lock:
+            # Skip events from prior ComfyUI sessions, but retain new events
+            # written immediately after the managed worker is spawned.
+            path = self.root / "data" / "operations.log"
+            try:
+                state = path.stat()
+                self._event_identity = (state.st_dev, state.st_ino)
+                self._event_offset = state.st_size
+            except OSError:
+                self._event_identity = None
+                self._event_offset = 0
             self._spawn()
             if self._monitor is None and not self._disabled:
                 self._monitor = threading.Thread(
@@ -345,9 +358,72 @@ class ManagedTTS:
         except (ImportError, AttributeError, RuntimeError):
             return False
 
+    def _relay_events(self):
+        """Forward only allowlisted worker activity to the main ComfyUI console.
+
+        The child service's stdout/stderr remain in managed-server.log because
+        third-party libraries might include speech content in their diagnostics.
+        Never mirror that raw stream here.
+        """
+        path = self.root / "data" / "operations.log"
+        try:
+            state = path.stat()
+            identity = (state.st_dev, state.st_ino)
+            if identity != self._event_identity or state.st_size < self._event_offset:
+                self._event_offset = 0
+                self._event_identity = identity
+            with path.open("rb") as handle:
+                handle.seek(self._event_offset)
+                chunk = handle.read(65536)
+            last_line = chunk.rfind(b"\\n")
+            if last_line < 0:
+                return
+            self._event_offset += last_line + 1
+            from .tts_api.operations import (
+                EVENTS, ID_PATTERN, VALID_STRINGS,
+                INT_FIELDS, FLOAT_FIELDS, BOOL_FIELDS,
+            )
+            for line in chunk[:last_line + 1].splitlines():
+                try:
+                    record = json.loads(line)
+                    if not isinstance(record, dict) or record.get("event") not in EVENTS:
+                        continue
+                    pieces = [record["event"]]
+                    rid = record.get("request_id")
+                    if isinstance(rid, str) and ID_PATTERN.fullmatch(rid):
+                        pieces.append("req=" + rid)
+                    # This is an allowlist, NOT a generic dict dump. The
+                    # message text, descriptions, exception strings, API keys,
+                    # voice names and file paths are never forwarded.
+                    for key in (
+                        "model", "backend", "kind", "voice_type", "reason",
+                        "status", "characters", "audio_seconds", "audio_bytes",
+                        "elapsed_ms", "error_type", "cached",
+                    ):
+                        value = record.get(key)
+                        valid = (
+                            key in VALID_STRINGS and isinstance(value, str)
+                            and VALID_STRINGS[key].fullmatch(value)
+                        ) or (
+                            key in INT_FIELDS and type(value) is int
+                            and 0 <= value <= 10**12
+                        ) or (
+                            key in FLOAT_FIELDS and type(value) in (int, float)
+                            and 0 <= value < 10**10
+                        ) or (key in BOOL_FIELDS and type(value) is bool)
+                        if valid:
+                            pieces.append(f"{key}={value}")
+                    LOG.info("[TTS API] %s", " ".join(pieces))
+                except (ValueError, UnicodeDecodeError, TypeError):
+                    continue
+        except (OSError, ImportError):
+            # Logging must not affect worker scheduling or speech generation.
+            return
+
     def _watch_queue(self):
         # Do not import CUDA libraries or unload ComfyUI models from this thread.
         while not self._stop.wait(self.interval):
+            self._relay_events()
             with self._lock:
                 if self._disabled:
                     continue
