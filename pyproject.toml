@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-tts-api"
-version = "0.5.0"
-description = "ComfyUI-managed VoxCPM2 and Qwen3-TTS speech API with native sidebar and SillyTavern compatibility"
+version = "0.6.0"
+description = "ComfyUI-managed VoxCPM2, Qwen3-TTS and IndexTTS 2.5 speech API with native sidebar and SillyTavern compatibility"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1",
