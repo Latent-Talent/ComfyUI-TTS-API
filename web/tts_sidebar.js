@@ -259,7 +259,9 @@ function mount(container) {
             return;
         }
         for (const spec of profile.fields) {
-            const label = document.createElement("label");
+            // A vector is a group of individual labels, not a label nesting
+            // eight more labels. Other controls have one associated label.
+            const label = document.createElement(spec.kind === "vector" ? "div" : "label");
             label.className = "tts-default-field";
             if (spec.kind === "textarea" || spec.kind === "vector") {
                 label.classList.add("is-wide");
