@@ -92,7 +92,7 @@ git pull --ff-only
 bash install-index.sh
 ```
 
-Prerequisite: [uv](https://docs.astral.sh/uv/getting-started/installation/) must be available in your shell. The installer uses `uv python install 3.11`, which installs a managed interpreter without replacing your system Python. Installing IndexTTS is optional and does not reinstall VoxCPM2 or Qwen3-TTS.
+The installer finds an existing `uv` binary or, if none exists, installs a **private standalone copy** at `ComfyUI/models/TTS/IndexTTS-2.5/tools/uv` using Astral's official installer. It does not use `pip`, change system Python, or edit your shell profile. It then uses `uv python install 3.11` to obtain a separately managed interpreter, without replacing your existing Python. IndexTTS remains optional and does not reinstall VoxCPM2 or Qwen3-TTS.
 
 Restart ComfyUI, then open **TTS API → Server**, select **IndexTTS · 2.5**, and click **Download IndexTTS 2.5 weights**. Downloaded weights go to `ComfyUI/models/TTS/IndexTTS-2.5/checkpoints`. The engine's auxiliary models also cache beneath that checkpoint directory. The lightweight HTTP API stays in its existing Python 3.12 environment; IndexTTS runs in its own subprocess and uses the same ComfyUI queue reservation.
 
