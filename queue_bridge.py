@@ -39,13 +39,12 @@ class QueueBroker:
 
     def active(self) -> bool:
         with self._lock:
-            return any(slot.state in ("activating", "running") and not slot.done.is_set()
+            return any(slot.state in ("activating", "running")
                        for slot in self._slots.values())
 
     def outstanding(self) -> bool:
         with self._lock:
-            return any(slot.state in ("pending", "activating", "running")
-                       and not slot.done.is_set() for slot in self._slots.values())
+            return any(slot.state in ("pending", "activating", "running") for slot in self._slots.values())
 
     def create(self, ticket: str, server, kind: str = "speech") -> str:
         if not isinstance(ticket, str) or not TICKET_PATTERN.fullmatch(ticket):
