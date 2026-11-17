@@ -75,3 +75,32 @@
 .tts-ui .tts-emotion-grid label {
   min-width: 0;
 }
+
+/* Model-specific defaults are scoped to the native Server tab. */
+.tts-ui .tts-defaults-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 4px 0 10px;
+}
+.tts-ui .tts-default-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.tts-ui .tts-default-field.is-wide { grid-column: 1 / -1; }
+.tts-ui .tts-default-field > input,
+.tts-ui .tts-default-field > select,
+.tts-ui .tts-default-field > textarea {
+  width: 100%;
+  min-width: 0;
+}
+.tts-ui .tts-default-field > small {
+  line-height: 1.4;
+}
+.tts-ui .tts-default-field .tts-emotion-grid { margin-top: 4px; }
+@media (max-width: 310px) {
+  .tts-ui .tts-defaults-fields { grid-template-columns: 1fr; }
+  .tts-ui .tts-default-field.is-wide { grid-column: 1; }
+}
