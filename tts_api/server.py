@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import io
+import importlib.util
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 import subprocess
 import shutil
@@ -20,26 +22,28 @@ from pydantic import BaseModel, Field
 
 from .engine import VoxEngine
 from .storage import VoiceStore
+from .qwen_engine import QwenEngine
+from .models import (
+    VOX_ID, QWEN_DEFAULT, QWEN_DESIGN, QWEN_MODELS, QWEN_SPEAKERS,
+    QWEN_SPEAKERS_LOOKUP, OPENAI_MODEL_ALIASES, OPENAI_VOICE_ALIASES,
+    canonical_model, is_qwen, qwen_base_for, model_catalog,
+)
 
 LOG = logging.getLogger("comfyui-tts-api.server")
 
 ROOT = Path(os.environ.get("TTS_DATA_DIR", "./data")).expanduser().resolve()
 STORE = VoiceStore(ROOT / "voices")
 MODEL = os.environ.get("TTS_MODEL", "openbmb/VoxCPM2")
-# SillyTavern's OpenAI Compatible TTS defaults to tts-1. These model IDs
-# are compatibility aliases; they all invoke the same local VoxCPM2 weights.
-# Do not imply that an actual OpenAI model or HD engine runs locally.
-OPENAI_MODEL_ALIASES = frozenset({
-    "tts-1", "tts-1-hd", "tts-1-1106", "tts-1-hd-1106",
-    "gpt-4o-mini-tts",
-})
-# SillyTavern also defaults to these OpenAI voice names. Map them to the
-# default local voice; distinct characters still use persisted voice_... IDs.
-OPENAI_VOICE_ALIASES = frozenset({
-    "alloy", "echo", "fable", "onyx", "nova", "shimmer",
-    "ash", "ballad", "coral", "sage", "verse", "marin", "cedar",
-})
 ENGINE = VoxEngine(MODEL, os.getenv("TTS_UNLOAD_AFTER_REQUEST", "false").lower() == "true")
+QWEN_ENGINE = QwenEngine(
+    os.getenv("TTS_UNLOAD_AFTER_REQUEST", "false").lower() == "true"
+)
+ACTIVE_MODEL = canonical_model(
+    os.getenv("TTS_ACTIVE_MODEL", VOX_ID), default=VOX_ID,
+    voxcpm_checkpoint=MODEL,
+)
+INFERENCE_LOCK = threading.RLock()
+
 KEY = os.getenv("TTS_API_KEY", "")
 MAX_TEXT = int(os.getenv("TTS_MAX_TEXT", "12000"))
 MAX_UPLOAD = int(os.getenv("TTS_MAX_UPLOAD_MB", "20")) * 1024 * 1024
@@ -93,16 +97,19 @@ class SpeechRequest(BaseModel):
     seed: int | None = None
     steps: int = Field(default=10, ge=1, le=100)
     cfg: float = Field(default=2.0, ge=0, le=10)
+    language: str = Field(default="Auto", max_length=40)
 
 
 class DesignRequest(BaseModel):
+    model: str | None = None
+    language: str = Field(default="Auto", max_length=40)
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(min_length=1, max_length=1000)
     sample_text: str = Field(default="Hello, this is my new voice.", max_length=1000)
     seed: int | None = None
 
 
-def _resolve_voice(value: str) -> dict | None:
+def _resolve_voice(value: str, *, backend: str = VOX_ID) -> dict | None:
     """Resolve a SillyTavern voice by saved ID, unique name, or built-in alias.
 
     SillyTavern treats comma-separated voice entries as literal strings, so
@@ -138,6 +145,8 @@ def _resolve_voice(value: str) -> dict | None:
 
     if requested.casefold() == "default" or requested.casefold() in OPENAI_VOICE_ALIASES:
         return None
+    if is_qwen(backend) and requested.casefold() in QWEN_SPEAKERS_LOOKUP:
+        return None
 
     available = ["default"] + [record["id"] for record in saved]
     raise HTTPException(
@@ -153,22 +162,35 @@ def _resolve_voice(value: str) -> dict | None:
 def _render(request: SpeechRequest) -> bytes:
     if len(request.input) > MAX_TEXT:
         raise ValueError(f"Input longer than {MAX_TEXT} characters")
-    if request.model not in ({"voxcpm2", MODEL} | OPENAI_MODEL_ALIASES):
-        raise ValueError(
-            f"Unknown model: {request.model!r}. Set SillyTavern's model to "
-            "'voxcpm2' or use its default 'tts-1' compatibility alias."
-        )
-    voice = _resolve_voice(request.voice)
+    model_id = canonical_model(request.model, ACTIVE_MODEL, MODEL)
+    voice = _resolve_voice(request.voice, backend=model_id)
     ref = str(STORE.audio_path(voice)) if voice and voice.get("reference_file") else None
-    # Unlike direct VoxCPM2 prefixing, this produces ONLY request.input as
-    # final spoken text. A short, cached voice-reference pass carries delivery
-    # style separately when instructions are present.
     reference_text = voice.get("reference_text") if voice and ref else None
-    return ENGINE.generate_with_delivery(
-        request.input, instructions=request.instructions,
-        reference_path=ref, reference_text=reference_text or None,
-        seed=request.seed, steps=request.steps, cfg=request.cfg
-    )
+
+    # All backend switching occurs inside this serialized section. No two GPU
+    # models are retained across VoxCPM / Qwen3-TTS requests.
+    with INFERENCE_LOCK:
+        if is_qwen(model_id):
+            if ENGINE.loaded:
+                ENGINE.unload()
+            actual_model = model_id
+            if voice is not None:
+                if not ref:
+                    raise ValueError("Saved voice has no reference audio to clone")
+                actual_model = qwen_base_for(model_id)
+            return QWEN_ENGINE.generate(
+                actual_model, request.input, voice=request.voice,
+                reference_path=ref, reference_text=reference_text,
+                instructions=request.instructions, language=request.language,
+                seed=request.seed,
+            )
+        if QWEN_ENGINE.loaded:
+            QWEN_ENGINE.unload()
+        return ENGINE.generate_with_delivery(
+            request.input, instructions=request.instructions,
+            reference_path=ref, reference_text=reference_text or None,
+            seed=request.seed, steps=request.steps, cfg=request.cfg,
+        )
 
 
 @app.get("/health")
