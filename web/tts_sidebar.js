@@ -469,9 +469,30 @@ function mount(container) {
         updateDefaultFieldVisibility();
     }
 
+    async function registerAudioFile(file, consent, label) {
+        if (!consent) {
+            throw new Error("Confirm permission to use " + label + " before uploading.");
+        }
+        if (!file || !file.size || file.size > 20 * 1024 * 1024) {
+            throw new Error("Choose a valid audio recording no larger than 20 MB.");
+        }
+        const form = new FormData();
+        const friendlyName = file.name.replace(/\.[^.]+$/, "").slice(0, 120) || "TTS reference";
+        form.append("name", friendlyName);
+        form.append("reference_text", "");
+        form.append("consent", "true");
+        form.append("audio", file);
+        const voice = await (await request("/voices/clone", {
+            method: "POST", body: form,
+        })).json();
+        savedVoices.push(voice);
+        return voice;
+    }
+
     async function uploadPendingDefaultAudio(payload) {
         const modelId = payload.model_id;
         const profile = defaultsByModel[modelId];
+        // Do not upload hidden reference-audio fields from an inactive mode.
         for (const spec of profile.fields.filter((f) => f.kind === "audio_voice")) {
             const key = audioKey(modelId, spec.name);
             const pending = pendingAudio.get(key);
@@ -479,25 +500,11 @@ function mount(container) {
             const row = $("[data-model-defaults-fields]")
                 .querySelector('[data-default-row="' + spec.name + '"]');
             if (row?.hidden) continue;
-            if (!pending.consent) {
-                throw new Error("Confirm permission to use " + spec.label + " before saving.");
-            }
-            if (pending.file.size > 20 * 1024 * 1024) {
-                throw new Error("Audio file exceeds 20 MB; select a shorter recording.");
-            }
-            const form = new FormData();
-            const friendlyName = pending.file.name.replace(/\.[^.]+$/, "").slice(0, 120)
-                || "TTS reference";
-            form.append("name", friendlyName);
-            form.append("reference_text", "");
-            form.append("consent", "true");
-            form.append("audio", pending.file);
-            const voice = await (await request("/voices/clone", {
-                method: "POST", body: form,
-            })).json();
+            const voice = await registerAudioFile(
+                pending.file, pending.consent, spec.label
+            );
             payload.settings[spec.name] = voice.id;
             pendingAudio.delete(key);
-            savedVoices.push(voice);
         }
     }
 
@@ -833,6 +840,14 @@ function mount(container) {
         }, "Built-in defaults restored for this model."
     ));
     $("[data-index-emo-mode]").addEventListener("change", updateEmotionControls);
+    $("[data-test-voice-file]").addEventListener("change", () => {
+        $("[data-test-voice-consent]").checked = false;
+        updateTestModelNote();
+    });
+    $("[data-index-emo-file]").addEventListener("change", () => {
+        $("[data-index-emo-file-consent]").checked = false;
+        updateEmotionControls();
+    });
     updateEmotionControls();
     $("[data-action=apply-model]").addEventListener("click", (e) => perform(
         e.currentTarget, async () => {
@@ -966,6 +981,32 @@ function mount(container) {
                 }
             }
             if (!body.input.trim()) throw new Error("Enter text to speak.");
+            const mainFile = $("[data-test-voice-file]").files?.[0];
+            if (mainFile && !body.model.endsWith("-voicedesign")) {
+                const voice = await registerAudioFile(
+                    mainFile, $("[data-test-voice-consent]").checked, "character voice"
+                );
+                body.voice = voice.id;
+                $("[data-test-voice-file]").value = "";
+                $("[data-test-voice-consent]").checked = false;
+                await refreshVoices();
+                $("[data-test-voice]").value = voice.id;
+                updateTestModelNote();
+            }
+            const emotionFile = $("[data-index-emo-file]").files?.[0];
+            if (body.model === "indextts-2.5" && body.emotion_mode === "reference" &&
+                emotionFile) {
+                const voice = await registerAudioFile(
+                    emotionFile, $("[data-index-emo-file-consent]").checked,
+                    "emotion reference"
+                );
+                body.emotion_reference_voice = voice.id;
+                $("[data-index-emo-file]").value = "";
+                $("[data-index-emo-file-consent]").checked = false;
+                await refreshVoices();
+                $("[data-index-emo-reference]").value = voice.id;
+                updateEmotionControls();
+            }
             const response = await request("/speech", {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body),
