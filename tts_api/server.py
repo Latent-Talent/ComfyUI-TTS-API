@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from .engine import VoxEngine
 from .storage import VoiceStore
 from .qwen_engine import QwenEngine
-from .operations import REQUEST_ID, configure as configure_operations, emit, recent
+from .operations import REQUEST_ID, configure as configure_operations, emit
 from .models import (
     VOX_ID, QWEN_DEFAULT, QWEN_DESIGN, QWEN_MODELS, QWEN_SPEAKERS,
     QWEN_SPEAKERS_LOOKUP, OPENAI_MODEL_ALIASES, OPENAI_VOICE_ALIASES,
@@ -339,11 +339,6 @@ async def voices():
            "description": v.get("description", ""), "source": "saved"}
           for v in STORE.list()],
     ]}
-
-
-@app.get("/api/operations", dependencies=[Depends(authenticate)])
-async def operation_history(limit: int = 100):
-    return {"events": recent(limit), "text_logged": False}
 
 
 @app.get("/api/models", dependencies=[Depends(authenticate)])
