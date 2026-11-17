@@ -135,6 +135,12 @@ function template() {
           <option value="Russian">Russian</option>
         </select></label>
         <label>Character voice<select data-test-voice><option value="default">Default voice</option></select></label>
+        <label data-test-voice-file-row class="tts-audio-picker">Or browse for a character recording
+          <input data-test-voice-file type="file" accept="audio/*,.wav,.flac,.ogg,.mp3,.aiff">
+        </label>
+        <label data-test-voice-consent-row hidden class="tts-check">
+          <input data-test-voice-consent type="checkbox"> I have permission to use this recording
+        </label>
         <label>Text<textarea data-test-text rows="5">Hello! This is a test of my local text to speech server.</textarea></label>
         <label>Delivery instructions (optional)<textarea data-test-delivery rows="2" placeholder="Warm and relaxed"></textarea></label>
         <div class="tts-test-row">
@@ -153,6 +159,12 @@ function template() {
             <option value="reference">Emotion from a second saved voice</option>
           </select></label>
           <label data-index-emo-ref-row hidden>Emotion reference<select data-index-emo-reference><option value="default">Select saved voice</option></select></label>
+          <label data-index-emo-file-row hidden class="tts-audio-picker">Or browse for an emotion recording
+            <input data-index-emo-file type="file" accept="audio/*,.wav,.flac,.ogg,.mp3,.aiff">
+          </label>
+          <label data-index-emo-file-consent-row hidden class="tts-check">
+            <input data-index-emo-file-consent type="checkbox"> I have permission to use this recording
+          </label>
           <div data-index-emo-vector-row hidden>
             <p class="tts-hint">Intensity 0–1 for each emotion.</p>
             <div class="tts-emotion-grid">
@@ -587,6 +599,9 @@ function mount(container) {
         const mode = $("[data-index-emo-mode]").value;
         $("[data-index-emo-vector-row]").hidden = mode !== "vector";
         $("[data-index-emo-ref-row]").hidden = mode !== "reference";
+        $("[data-index-emo-file-row]").hidden = mode !== "reference";
+        $("[data-index-emo-file-consent-row]").hidden =
+            mode !== "reference" || !$("[data-index-emo-file]").files?.length;
     }
 
     function updateTestModelNote() {
@@ -595,6 +610,10 @@ function mount(container) {
         const qwen = id.startsWith("qwen3-tts");
         const index = id === "indextts-2.5";
         $("[data-index-emotion]").hidden = !index;
+        const isDesign = id.endsWith("-voicedesign");
+        $("[data-test-voice-file-row]").hidden = isDesign;
+        $("[data-test-voice-consent-row]").hidden =
+            isDesign || !$("[data-test-voice-file]").files?.length;
         $("[data-test-steps]").disabled = qwen || index;
         $("[data-test-steps]").title = qwen || index
             ? "This backend does not use VoxCPM inference steps"
