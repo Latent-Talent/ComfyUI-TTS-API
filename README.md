@@ -72,9 +72,11 @@ If `TTS_API_KEY` is configured, authenticated requests require the header `Autho
 
 ### SillyTavern
 
-Set the TTS provider to **OpenAI Compatible**, model `voxcpm2`, voice `default` or a saved ID, and the speech endpoint:
+Set the TTS provider to **OpenAI Compatible**, model `voxcpm2` (recommended) or SillyTavern's default `tts-1` (accepted compatibility alias), voice `default` or a saved ID, and the speech endpoint:
 
 `http://127.0.0.1:8025/v1/audio/speech`
+
+**Compatibility aliases:** The model IDs `tts-1`, `tts-1-hd`, `tts-1-1106`, `tts-1-hd-1106`, and `gpt-4o-mini-tts` all invoke the same local **VoxCPM2** backend. They do *not* run an OpenAI model or enable different quality modes. OpenAI default speaker names (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`, etc.) map to the single local default voice; for distinct character voices, create voices in the sidebar and use their persistent `voice_...` IDs. Unknown model names still return 422, and unknown custom voice IDs return 404.
 
 Some SillyTavern versions instead ask for an API root; use `http://127.0.0.1:8025/v1` in that case. Enter saved voice IDs manually if your version does not discover them. When SillyTavern runs on a different device, use the ComfyUI host's LAN/VPN address and enable authenticated LAN serving as described below.
 
