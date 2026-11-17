@@ -152,6 +152,9 @@ class QwenEngine:
     ) -> bytes:
         if not text.strip():
             raise ValueError("Input text cannot be empty")
+        # Prevent use of an already resident checkpoint outside the same
+        # ComfyUI queue reservation that governs cold model loads.
+        require_queue_reservation()
         if model_id not in QWEN_MODELS:
             raise ValueError(f"Unknown Qwen3-TTS model {model_id!r}")
         with self._lock:
