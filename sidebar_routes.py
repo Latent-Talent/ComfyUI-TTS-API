@@ -285,6 +285,69 @@ async def clone(request: web.Request) -> web.Response:
     return await _forward("POST", "/api/voices/clone", multipart=form)
 
 
+def _voice_id_from_route(request: web.Request) -> str | None:
+    value = request.match_info.get("voice_id", "")
+    if not value.startswith("voice_") or not value.replace("_", "").isalnum():
+        return None
+    if len(value) > 80:
+        return None
+    return value
+
+
+async def voice_details(request: web.Request) -> web.Response:
+    voice_id = _voice_id_from_route(request)
+    if voice_id is None:
+        return _error(422, "Invalid voice ID")
+    return await _forward("GET", f"/api/voices/{voice_id}")
+
+
+async def voice_audio(request: web.Request) -> web.Response:
+    voice_id = _voice_id_from_route(request)
+    if voice_id is None:
+        return _error(422, "Invalid voice ID")
+    return await _forward("GET", f"/api/voices/{voice_id}/audio", audio=True)
+
+
+async def edit_voice(request: web.Request) -> web.Response:
+    voice_id = _voice_id_from_route(request)
+    if voice_id is None:
+        return _error(422, "Invalid voice ID")
+    origin = request.headers.get("Origin")
+    if origin and urlsplit(origin).netloc != request.host:
+        return _error(403, "Voice changes must originate from the ComfyUI page")
+    max_size = int(_MANAGER.config.get("TTS_MAX_UPLOAD_MB", 20)) * 1024 * 1024
+    fields = {}
+    audio = None
+    try:
+        reader = await request.multipart()
+        while part := await reader.next():
+            if part.name == "audio":
+                data = bytearray()
+                while chunk := await part.read_chunk(65536):
+                    data.extend(chunk)
+                    if len(data) > max_size:
+                        return _error(413, "Voice recording exceeds upload limit")
+                audio = bytes(data) if data else None
+            elif part.name in ("name", "description", "reference_text", "consent"):
+                content = await part.read(decode=True)
+                if len(content) > 5000:
+                    return _error(413, "Voice metadata exceeds size limit")
+                fields[part.name] = content.decode("utf-8")
+        if not fields.get("name", "").strip():
+            return _error(422, "Voice name is required")
+        if audio is not None and fields.get("consent") != "true":
+            return _error(422, "Voice recording permission must be confirmed")
+        form = FormData()
+        for key in ("name", "description", "reference_text", "consent"):
+            form.add_field(key, fields.get(key, ""))
+        if audio is not None:
+            form.add_field("audio", audio, filename="reference.bin",
+                           content_type="application/octet-stream")
+    except (UnicodeError, ValueError, RuntimeError, web.HTTPException):
+        return _error(400, "Invalid voice update")
+    return await _forward("PATCH", f"/api/voices/{voice_id}", multipart=form)
+
+
 async def delete_voice(request: web.Request) -> web.Response:
     voice_id = request.match_info["voice_id"]
     if not voice_id.startswith("voice_") or not voice_id.replace("_", "").isalnum():
@@ -368,6 +431,9 @@ def register_routes():
     routes.get(BASE + "/voices")(voices)
     routes.post(BASE + "/voices/design")(design)
     routes.post(BASE + "/voices/clone")(clone)
+    routes.get(BASE + "/voices/{voice_id}")(voice_details)
+    routes.get(BASE + "/voices/{voice_id}/audio")(voice_audio)
+    routes.patch(BASE + "/voices/{voice_id}")(edit_voice)
     routes.delete(BASE + "/voices/{voice_id}")(delete_voice)
     routes.post(BASE + "/speech")(generate)
     routes.post(BASE + "/model/unload")(unload)
