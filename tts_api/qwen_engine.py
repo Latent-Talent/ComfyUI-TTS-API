@@ -19,6 +19,7 @@ import numpy as np
 import soundfile as sf
 
 from .operations import emit
+from .comfy_queue import active_request_kind, require_queue_reservation
 
 from .models import QWEN_MODELS, QWEN_SPEAKERS_LOOKUP
 
@@ -94,6 +95,7 @@ class QwenEngine:
             self._lock.release()
 
     def _load(self, model_id: str) -> None:
+        require_queue_reservation()
         if self.loaded and self._model_id == model_id:
             return
         if model_id not in QWEN_MODELS:
@@ -116,7 +118,8 @@ class QwenEngine:
             "attn_implementation": "sdpa" if is_cuda else "eager",
         }
         repo = QWEN_MODELS[model_id]["repo"]
-        emit("model.load.started", backend="qwen3-tts", model=model_id)
+        emit("model.load.started", backend="qwen3-tts", model=model_id,
+             kind=active_request_kind())
         started = time.perf_counter()
         try:
             self._model = Qwen3TTSModel.from_pretrained(repo, **kwargs)
