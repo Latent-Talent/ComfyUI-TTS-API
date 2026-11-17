@@ -78,6 +78,9 @@ class ManagedTTS:
         self._monitor = None
         self._reserved = False
         self._hold_until = 0.0
+        self._reclaim_pending = False
+        self._last_reclaim_attempt = 0.0
+        self._reclaim_failures = 0
         self._installed = False
         self._owns_child = False
         self._parent_write_fd = None
@@ -226,6 +229,30 @@ class ManagedTTS:
                 return response.status == 200
         except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
             return False
+
+    def _request_reclaim(self, timeout=2.0) -> str:
+        """Report busy separately from transport failures.
+
+        A 409 means the isolated worker is currently generating, NOT that its
+        model is stuck. The ComfyUI queue serializes that generation with later
+        workflows; terminating it on 409 would interrupt a valid request.
+        """
+        req = urllib.request.Request(
+            self.url + "/api/internal/reclaim",
+            data=b"{}",
+            headers={
+                "X-TTS-Control-Token": self.control_token,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return "reclaimed" if response.status == 200 else "error"
+        except urllib.error.HTTPError as exc:
+            return "busy" if exc.code == 409 else "error"
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return "unreachable"
 
     def _healthy(self):
         try:
@@ -566,6 +593,12 @@ class ManagedTTS:
                     self._reserved = True
                     self._hold_until = time.monotonic() + 1
                     self._yield_gpu()
+                if (self._reclaim_pending and self._running() and
+                        not tts_active and
+                        time.monotonic() - self._last_reclaim_attempt >= 3.0):
+                    # Retry a transient busy/timeout response without
+                    # repeatedly stopping and relaunching the API process.
+                    self._yield_gpu()
                 if (self._reserved and not busy and
                         time.monotonic() >= self._hold_until):
                     # Reclaiming cached weights is NOT a persistent pause.
@@ -573,16 +606,37 @@ class ManagedTTS:
                     # owned process; otherwise leave the idle API untouched.
                     if not self._running():
                         self._spawn()
-                    if self._running():
+                    if self._running() and not self._reclaim_pending:
                         self._reserved = False
 
     def _yield_gpu(self):
-        """Must hold self._lock. Reclaim cached models without pausing the API."""
+        """Must hold self._lock. Reclaim VRAM; defer busy/slow responses safely."""
         if not self._running():
+            self._reclaim_pending = False
             return
-        if not self._request("/api/internal/reclaim", timeout=2.0):
-            LOG.warning("[TTS API] GPU reclaim failed; stopping owned TTS worker to free VRAM")
+        result = self._request_reclaim(timeout=2.0)
+        self._last_reclaim_attempt = time.monotonic()
+        if result == "reclaimed":
+            self._reclaim_pending = False
+            self._reclaim_failures = 0
+            return
+        self._reclaim_pending = True
+        if result == "busy":
+            self._reclaim_failures = 0
+            LOG.debug("[TTS API] GPU reclaim deferred; TTS inference still active")
+            return
+        self._reclaim_failures += 1
+        if self._reclaim_failures >= 3 and not self._healthy():
+            # Escalate only after repeated errors *and* a failed health check.
+            # A healthy or busy service must not be stopped for slow cleanup.
+            LOG.warning("[TTS API] Managed worker unresponsive after repeated "
+                        "GPU reclaim failures; restarting worker to free VRAM")
             self._terminate()
+            self._reclaim_pending = False
+            self._reclaim_failures = 0
+        else:
+            LOG.warning("[TTS API] GPU reclaim %s; keeping worker alive and "
+                        "retrying without interrupting speech", result)
 
     def reserve_for_comfy(self):
         try:
