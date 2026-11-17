@@ -160,6 +160,11 @@ class QwenEngine:
                         torch.manual_seed(int(seed))
                     kind = QWEN_MODELS[model_id]["kind"]
                     if kind == "customvoice":
+                        if model_id == "qwen3-tts-0.6b-customvoice" and instructions.strip():
+                            raise ValueError(
+                                "Qwen 0.6B CustomVoice does not support delivery instructions. "
+                                "Choose 1.7B CustomVoice or clear the instructions."
+                            )
                         speaker = QWEN_SPEAKERS_LOOKUP.get(voice.strip().casefold())
                         if speaker is None:
                             speaker = "Ryan" if voice.strip().casefold() in (
@@ -182,6 +187,11 @@ class QwenEngine:
                             language=language,
                         )
                     else:
+                        if instructions.strip():
+                            raise ValueError(
+                                "Qwen Base voice cloning has no delivery-instruction input. "
+                                "Clear instructions or use 1.7B CustomVoice/VoiceDesign."
+                            )
                         if not reference_path:
                             raise ValueError(
                                 "Qwen Base requires a saved voice recording. "
