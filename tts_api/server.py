@@ -549,6 +549,14 @@ def apply_speech_defaults(request: SpeechRequest) -> SpeechRequest:
         key: value for key, value in profile.items()
         if key not in request.model_fields_set
     }
+    # Preserve legacy clients sending IndexTTS delivery instructions without
+    # a separate emotion mode. A previously saved, hidden description must
+    # never override an explicit neutral selection or activate by itself.
+    if (model_id == INDEX_ID and
+            "emotion_mode" not in request.model_fields_set and
+            "instructions" in request.model_fields_set and
+            request.instructions.strip()):
+        omitted["emotion_mode"] = "text"
     return request.model_copy(update=omitted) if omitted else request
 
 
