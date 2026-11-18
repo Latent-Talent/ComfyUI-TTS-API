@@ -5,6 +5,47 @@ import { api } from "../../scripts/api.js";
 const ROUTE = "/tts-api";
 let activePanel = null;
 
+// Session-only UI state. Do not retain API keys, permission checkboxes,
+// local file inputs, or microphone streams. The server instance identifier
+// invalidates the snapshot when ComfyUI itself restarts (not the TTS worker).
+const SIDEBAR_SESSION_KEY = "latent-talent.tts-api.sidebar-session.v1";
+const SESSION_FIELDS = [
+    "selected-model", "test-model", "test-language", "test-voice",
+    "test-text", "test-delivery", "test-seed", "test-steps",
+    "index-emo-mode", "index-emo-reference", "index-emo-strength",
+    "index-duration", "voice-search",
+    "design-model", "design-name", "design-description",
+    "design-sample", "design-seed", "clone-name", "clone-transcript",
+];
+let savedSidebarSession = null;
+let comfyuiSessionId = null;
+
+function storedSidebarSession() {
+    try {
+        const raw = window.sessionStorage.getItem(SIDEBAR_SESSION_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (_) {
+        return null; // Session storage can be disabled by the browser.
+    }
+}
+
+function clearSidebarSession() {
+    savedSidebarSession = null;
+    try { window.sessionStorage.removeItem(SIDEBAR_SESSION_KEY); } catch (_) { /* Unavailable */ }
+}
+
+function rememberComfyuiSession(instanceId) {
+    if (typeof instanceId !== "string" || !instanceId) return false;
+    const prior = comfyuiSessionId ||
+        (savedSidebarSession || storedSidebarSession())?.comfyuiSession;
+    comfyuiSessionId = instanceId;
+    if (prior && prior !== instanceId) {
+        clearSidebarSession();
+        return true;
+    }
+    return false;
+}
+
 async function request(path, options = {}) {
     const response = await api.fetchApi(ROUTE + path, options);
     if (!response.ok) {
@@ -261,7 +302,11 @@ function mount(container) {
     const root = container.querySelector(".tts-ui");
     let timer = null;
     let audioURL = null;
+    let lastAudioBlob = null;
     let destroyed = false;
+    let initializing = true;
+    let sessionVerified = false;
+    let skipSessionCapture = false;
     let modelList = [{ id: "voxcpm2", label: "VoxCPM2", kind: "voxcpm" }];
     let modelChoicesInitialized = false;
     let defaultsByModel = {};
@@ -275,6 +320,126 @@ function mount(container) {
     const qwenSpeakers = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric",
                           "Ryan", "Aiden", "Ono_Anna", "Sohee"];
     const $ = (selector) => root.querySelector(selector);
+
+    function captureSidebarSession() {
+        if (destroyed || initializing || !sessionVerified || !comfyuiSessionId) return;
+        const fields = {};
+        for (const name of SESSION_FIELDS) {
+            const control = $("[data-" + name + "]");
+            if (control) fields[name] = control.value;
+        }
+        const emotions = {};
+        root.querySelectorAll("[data-emotion]").forEach((field) => {
+            emotions[field.dataset.emotion] = field.value;
+        });
+        const defaults = {};
+        root.querySelectorAll("[data-model-defaults-fields] [data-default-field]").forEach((field) => {
+            const vectors = field.querySelectorAll("[data-vector-index]");
+            defaults[field.dataset.defaultField] = vectors.length
+                ? [...vectors].map((item) => item.value) : field.value;
+        });
+        const snapshot = {
+            comfyuiSession: comfyuiSessionId,
+            tab: root.querySelector("[data-tab].is-active")?.dataset.tab || "server",
+            fields, emotions, defaults,
+            defaultsModel: $("[data-selected-model]").value,
+            voiceAccordions: [...root.querySelectorAll('[data-panel="voices"] > details')]
+                .map((details) => details.open),
+            indexAccordion: $("[data-index-emotion]").open,
+            containerScroll: container.scrollTop,
+            rootScroll: root.scrollTop,
+        };
+        // Generated audio is kept in memory only, never in browser storage.
+        savedSidebarSession = {...snapshot, lastAudioBlob};
+        try { window.sessionStorage.setItem(SIDEBAR_SESSION_KEY, JSON.stringify(snapshot)); }
+        catch (_) { /* The in-memory snapshot is still usable. */ }
+    }
+
+    const persistOnEdit = () => captureSidebarSession();
+    root.addEventListener("input", persistOnEdit);
+    root.addEventListener("change", persistOnEdit);
+    root.addEventListener("toggle", persistOnEdit, true);
+    const onPageHide = () => captureSidebarSession();
+    window.addEventListener("pagehide", onPageHide);
+
+    function restoreField(name, value) {
+        const control = $("[data-" + name + "]");
+        if (!control || value == null) return;
+        // Never insert an unavailable backend or deleted voice into a select.
+        if (control.tagName === "SELECT" &&
+            ![...control.options].some((item) => item.value === String(value))) return;
+        control.value = String(value);
+    }
+
+    async function restoreSidebarSession(snapshot) {
+        const fields = snapshot.fields || {};
+        restoreField("selected-model", fields["selected-model"]);
+        renderModelDefaults(true);
+        if (snapshot.defaultsModel === $("[data-selected-model]").value) {
+            const fieldsRoot = $("[data-model-defaults-fields]");
+            for (const [name, value] of Object.entries(snapshot.defaults || {})) {
+                const input = fieldsRoot.querySelector('[data-default-field="' + name + '"]');
+                if (!input) continue;
+                if (Array.isArray(value)) {
+                    const vectors = input.querySelectorAll("[data-vector-index]");
+                    vectors.forEach((element, index) => {
+                        if (value[index] != null) element.value = String(value[index]);
+                    });
+                } else if (input.tagName !== "SELECT" ||
+                           [...input.options].some((option) => option.value === value)) {
+                    input.value = value;
+                }
+            }
+            updateDefaultFieldVisibility();
+        }
+
+        restoreField("test-model", fields["test-model"]);
+        updateTestModelNote();
+        // Speaker options vary by model and must exist before setting the voice.
+        try { await refreshVoices(); } catch (error) {
+            if (!destroyed) feedback(error.message, true);
+        }
+        if (destroyed) return;
+        for (const [name, value] of Object.entries(fields)) {
+            if (name === "selected-model" || name === "test-model" ||
+                name === "test-voice" || name === "index-emo-reference") continue;
+            restoreField(name, value);
+        }
+        restoreField("test-voice", fields["test-voice"]);
+        restoreField("index-emo-reference", fields["index-emo-reference"]);
+        for (const [emotion, value] of Object.entries(snapshot.emotions || {})) {
+            const input = root.querySelector('[data-emotion="' + emotion + '"]');
+            if (input) input.value = value;
+        }
+        updateEmotionControls();
+        showVoices();
+        root.querySelectorAll('[data-panel="voices"] > details').forEach((details, index) => {
+            details.open = Boolean(snapshot.voiceAccordions?.[index]);
+        });
+        $("[data-index-emotion]").open = Boolean(snapshot.indexAccordion);
+
+        const tab = ["server", "voices", "test"].includes(snapshot.tab)
+            ? snapshot.tab : "server";
+        root.querySelectorAll("[data-tab]").forEach((button) =>
+            button.classList.toggle("is-active", button.dataset.tab === tab));
+        root.querySelectorAll("[data-panel]").forEach((panel) =>
+            panel.hidden = panel.dataset.panel !== tab);
+
+        if (snapshot.lastAudioBlob instanceof Blob) {
+            lastAudioBlob = snapshot.lastAudioBlob;
+            if (audioURL) URL.revokeObjectURL(audioURL);
+            audioURL = URL.createObjectURL(lastAudioBlob);
+            $("[data-audio]").src = audioURL;
+            $("[data-audio]").hidden = false;
+        }
+        window.requestAnimationFrame(() => {
+            if (!destroyed) {
+                container.scrollTop = Number(snapshot.containerScroll) || 0;
+                root.scrollTop = Number(snapshot.rootScroll) || 0;
+            }
+        });
+        updateModelDownloadButton();
+    }
     let cloneRecorder = null;
     let cloneStream = null;
     let cloneRecordingFile = null;
@@ -473,6 +638,7 @@ function mount(container) {
         feedback("");
         if (name === "voices" || name === "test") refreshVoices().catch((e) => feedback(e.message, true));
         if (name === "server") refreshModels().catch(() => {});
+        captureSidebarSession();
     }
     root.querySelectorAll("[data-tab]").forEach((tab) =>
         tab.addEventListener("click", () => activeTab(tab.dataset.tab)));
@@ -501,7 +667,7 @@ function mount(container) {
         updateTestModelNote();
         updateModelDownloadButton();
         renderModelDefaults();
-        refreshVoices().catch(() => {});
+        if (!initializing) refreshVoices().catch(() => {});
     }
 
     function fillVoiceOptions(select, spec, modelId, value) {
@@ -839,6 +1005,15 @@ function mount(container) {
     async function refreshStatus() {
         const result = await (await request("/status")).json();
         if (destroyed) return;
+        const serverChanged = rememberComfyuiSession(result.comfyui_session);
+        if (result.comfyui_session) sessionVerified = true;
+        if (serverChanged && !initializing) {
+            // ComfyUI restarted while the browser stayed open. Do not let
+            // destroy() overwrite the cleared snapshot with stale fields.
+            skipSessionCapture = true;
+            mount(container);
+            return;
+        }
         const h = result.health;
         const ok = Boolean(h && h.ok);
         $(".tts-status-dot").className = "tts-status-dot " + (ok ? "is-online" : "is-offline");
@@ -1456,6 +1631,7 @@ function mount(container) {
                 body: JSON.stringify(body),
             });
             const blob = await response.blob();
+            lastAudioBlob = blob;
             if (audioURL) URL.revokeObjectURL(audioURL);
             cleanupVoicePreviews();
             audioURL = URL.createObjectURL(blob);
@@ -1463,13 +1639,42 @@ function mount(container) {
             player.src = audioURL;
             player.hidden = false;
             player.play().catch(() => {});
+            captureSidebarSession();
         }, "Generation complete."));
 
-    refreshModels().catch((e) => feedback(e.message, true));
-    refreshModelDefaults().then(() => refreshVoices().then(applyTestDefaults))
-        .catch((e) => feedback(e.message, true));
+    async function initializeSidebar() {
+        // Verify the ComfyUI process before restoring even a single prior
+        // field. A TTS worker restart does not change this identity.
+        try { await refreshStatus(); }
+        catch (error) { if (!destroyed) feedback(error.message, true); }
+        if (destroyed) return;
+        try { await refreshModels(); }
+        catch (error) { if (!destroyed) feedback(error.message, true); }
+        try { await refreshModelDefaults(); }
+        catch (error) { if (!destroyed) feedback(error.message, true); }
+        try { await refreshVoices(); }
+        catch (error) { if (!destroyed) feedback(error.message, true); }
+        if (destroyed) return;
+
+        const snapshot = savedSidebarSession || storedSidebarSession();
+        if (sessionVerified && snapshot &&
+            snapshot.comfyuiSession === comfyuiSessionId) {
+            await restoreSidebarSession(snapshot);
+        } else if (sessionVerified && snapshot) {
+            clearSidebarSession();
+        }
+        if (destroyed) return;
+        initializing = false;
+        captureSidebarSession();
+    }
+
+    initializeSidebar().catch((error) => {
+        if (!destroyed) {
+            initializing = false;
+            feedback(error.message, true);
+        }
+    });
     refreshDownloadStatus().catch(() => {});
-    refreshStatus().catch((e) => feedback(e.message, true));
     timer = window.setInterval(() => {
         if (!destroyed && document.visibilityState !== "hidden") {
             refreshStatus().catch(() => {});
@@ -1479,10 +1684,12 @@ function mount(container) {
 
     activePanel = {
         destroy() {
+            if (!skipSessionCapture) captureSidebarSession();
             destroyed = true;
             cancelCloneCapture();
             discardCloneRecording();
             document.removeEventListener("visibilitychange", onCloneVisibilityChange);
+            window.removeEventListener("pagehide", onPageHide);
             if (timer) window.clearInterval(timer);
             if (audioURL) URL.revokeObjectURL(audioURL);
             cleanupVoicePreviews();
