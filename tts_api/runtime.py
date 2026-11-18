@@ -70,6 +70,19 @@ def _eligible_linear(module, name: str, torch, scope: str) -> bool:
     raise ValueError(f"Unsupported INT8 conversion scope: {scope}")
 
 
+def require_int8_backend() -> None:
+    """Validate the optional INT8 dependency before loading large FP weights."""
+    try:
+        from torchao.quantization import (
+            Int8DynamicActivationInt8WeightConfig, quantize_,
+        )
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "INT8 requires a compatible TorchAO install in the TTS worker. "
+            "Run install-int8.sh for this worker or select Native precision."
+        ) from exc
+
+
 def quantize_int8(module, *, scope: str, torch=None) -> int:
     """Convert supported linear weights and dynamic activations to TorchAO W8A8.
 
@@ -78,15 +91,10 @@ def quantize_int8(module, *, scope: str, torch=None) -> int:
     """
     if torch is None:
         import torch
-    try:
-        from torchao.quantization import (
-            Int8DynamicActivationInt8WeightConfig, quantize_,
-        )
-    except (ImportError, OSError) as exc:
-        raise RuntimeError(
-            "INT8 requires a compatible TorchAO install in the selected TTS "
-            "worker environment; install torchao there or choose Native precision."
-        ) from exc
+    require_int8_backend()
+    from torchao.quantization import (
+        Int8DynamicActivationInt8WeightConfig, quantize_,
+    )
     eligible = [
         name for name, layer in module.named_modules()
         if _eligible_linear(layer, name, torch, scope)
