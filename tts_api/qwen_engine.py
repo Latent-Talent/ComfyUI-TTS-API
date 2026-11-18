@@ -108,7 +108,7 @@ class QwenEngine:
             self._lock.release()
 
     def _load(self, model_id: str) -> None:
-        require_queue_reservation()
+        require_queue_reservation(self._runtime["device"])
         if self.loaded and self._model_id == model_id:
             return
         if model_id not in QWEN_MODELS:
@@ -192,11 +192,11 @@ class QwenEngine:
             raise ValueError("Input text cannot be empty")
         # Prevent use of an already resident checkpoint outside the same
         # ComfyUI queue reservation that governs cold model loads.
-        require_queue_reservation()
+        require_queue_reservation(self._runtime["device"])
         if model_id not in QWEN_MODELS:
             raise ValueError(f"Unknown Qwen3-TTS model {model_id!r}")
         with self._lock:
-            if self._paused:
+            if self._paused and self._runtime["device"] != "cpu":
                 raise RuntimeError("Qwen3-TTS paused while ComfyUI needs GPU memory")
             self.last_error = None
             start = time.perf_counter()
