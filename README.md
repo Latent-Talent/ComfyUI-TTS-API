@@ -43,6 +43,12 @@ The core installer creates `ComfyUI-TTS-API/.venv`. VoxCPM2 is included and is t
 
 **Model selection:** Use **Server → Speech model** to choose a backend and **Make API default** to set the model used by aliases such as `tts-1`. The **Download model weights** button is shown only when the selected Qwen or IndexTTS checkpoint is not fully downloaded; it disappears when the local weights are present. The **Test** tab can select another backend without changing the API default. Models load on demand.
 
+### Sidebar session persistence
+
+The TTS sidebar retains the selected **Server / Voices / Test tab**, Test model and voice, speech text, seed, language, delivery and IndexTTS emotion controls, expanded sections, and unsaved model-default field edits when the sidebar is closed and reopened. Within the same browser tab it also restores those form values after a browser refresh. They are scoped to the running **ComfyUI server process**: restarting only the managed TTS API does not reset them, while restarting ComfyUI starts a fresh sidebar session.
+
+UI state is kept in the browser's tab-scoped session storage, with a process identifier provided by the ComfyUI gateway. For safety, API-key inputs, microphone permissions, consent checkboxes, file-picker selections, and in-progress recordings are **never persisted**. The last generated audio preview can survive sidebar close/reopen in memory, but not a browser refresh. Model defaults saved using **Save defaults** continue to be stored separately on the server, as before.
+
 ### Per-model defaults
 
 In **Server → Model-specific defaults**, selecting any model shows only settings supported by that checkpoint. Each model saves its own profile in `data/model_defaults.json` (file permissions 0600), so changing the default model does not overwrite another model's settings.
