@@ -15,9 +15,24 @@ PRECISION_OPTIONS = ("native", "int8")
 
 def runtime_options(settings: dict) -> dict:
     """Read strictly validated runtime defaults without forwarding to speech."""
-    device = settings.get("runtime_device", "auto")
-    precision = settings.get("runtime_precision", "native")
-    threads = settings.get("runtime_cpu_threads", 0)
+    # Saved model profiles use runtime_* keys. The API resolves those into
+    # canonical {device, precision, cpu_threads} before handing them to an
+    # engine. Do not interpret the canonical representation as defaults again:
+    # that silently changed requested CPU/INT8 back to Auto/Native.
+    canonical = {"device", "precision", "cpu_threads"}
+    saved = RUNTIME_FIELDS
+    if canonical.intersection(settings):
+        if saved.intersection(settings):
+            raise ValueError("Mixed canonical and saved TTS runtime settings")
+        if not canonical.issubset(settings):
+            raise ValueError("Incomplete canonical TTS runtime settings")
+        device = settings["device"]
+        precision = settings["precision"]
+        threads = settings["cpu_threads"]
+    else:
+        device = settings.get("runtime_device", "auto")
+        precision = settings.get("runtime_precision", "native")
+        threads = settings.get("runtime_cpu_threads", 0)
     if device not in DEVICE_OPTIONS:
         raise ValueError("Unsupported TTS execution device")
     if precision not in PRECISION_OPTIONS:
