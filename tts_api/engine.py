@@ -131,24 +131,32 @@ class VoxEngine:
                  kind=active_request_kind())
             load_started = time.perf_counter()
             try:
-                import torch
                 from voxcpm import VoxCPM
-                device = resolve_device(self._runtime["device"], torch)
-                apply_cpu_threads(torch, self._runtime["cpu_threads"], device)
+                # Preserve the zero-Torch-import native path for the gateway
+                # tests and let VoxCPM perform its original device selection.
+                # Only explicit runtime changes need to inspect PyTorch here.
+                torch = None
+                device = None
+                if self._runtime != runtime_options({}):
+                    import torch
+                    device = resolve_device(self._runtime["device"], torch)
+                    apply_cpu_threads(torch, self._runtime["cpu_threads"], device)
                 # Quantize the uncompiled model; compiled CUDA graphs may retain
                 # stale pointers when a Linear is replaced by a quantized one.
-                optimized = (self.optimize and device.startswith("cuda") and
-                             self._runtime["precision"] == "native")
+                optimized = (self.optimize and
+                             self._runtime["precision"] == "native" and
+                             device != "cpu")
+                kwargs = {"device": device} if device is not None else {}
                 self._model = VoxCPM.from_pretrained(
                     self.model_name, load_denoiser=False, optimize=optimized,
-                    device=device,
+                    **kwargs,
                 )
                 if self._runtime["precision"] == "int8":
                     target = getattr(self._model, "tts_model", None)
                     if target is None or not hasattr(target, "named_modules"):
                         raise RuntimeError("VoxCPM model does not expose its Torch modules for INT8")
                     self.quantized_layers = quantize_int8(target, scope="voxcpm", torch=torch)
-                self._resolved_device = device
+                self._resolved_device = device or "auto"
             except Exception as exc:
                 # from_pretrained may allocate CUDA tensors before raising,
                 # even when self._model has never been assigned.
