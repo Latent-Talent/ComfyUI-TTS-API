@@ -115,3 +115,26 @@ test("all three sidebar panes have independent constrained scrolling", () => {
     assert.match(css, /\.tts-ui \.tts-panel\s*\{[^}]*min-height: 0/s);
     assert.match(source, /panelScrolls:/);
 });
+
+test("cold speech and voice-design requests disable the frontend header timeout", async () => {
+    const calls = [];
+    const context = vm.createContext({
+        window: {},
+        app: {registerExtension: () => {}},
+        api: {fetchApi: async (path, options) => {
+            calls.push({path, options});
+            return {ok: true};
+        }},
+    });
+    vm.runInContext(source + "\nglobalThis.__request = request;", context);
+    await context.__request("/speech", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+    });
+    await context.__request("/voices/design", {method: "POST"});
+    await context.__request("/models");
+    assert.equal(calls[0].path, "/tts-api/speech");
+    assert.equal(calls[0].options.method, "POST");
+    assert.equal(calls[0].options.timeoutMs, null);
+    assert.equal(calls[1].options.timeoutMs, null);
+    assert.equal(calls[2].options.timeoutMs, undefined);
+});
