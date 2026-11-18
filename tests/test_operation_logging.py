@@ -164,3 +164,33 @@ def test_console_relay_revalidates_tampered_log_entries(tmp_path, monkeypatch, c
     assert "characters=33" in messages[0]
     assert secret not in messages[0]
     assert "not-a-valid-id" not in messages[0]
+
+
+def test_cpu_int8_conversion_progress_relayed_without_speech_text(
+        tmp_path, monkeypatch, caplog):
+    """CPU/INT8 evidence reaches the ComfyUI console, not the private input."""
+    monkeypatch.setattr(operations, "_FILE", None)
+    operations.configure(tmp_path / "data")
+    secret = "PRIVATE INPUT NEVER PRINTED"
+    operations.emit("model.runtime.selected", model="voxcpm2",
+                    backend="voxcpm2", device="cpu",
+                    precision="int8", text=secret)
+    operations.emit("model.quantization.started", backend="voxcpm2",
+                    device="cpu", precision="int8",
+                    quantized_layers=37, text=secret)
+    operations.emit("model.quantization.completed", backend="voxcpm2",
+                    device="cpu", precision="int8",
+                    quantized_layers=37, text=secret)
+    manager = ManagedTTS(root=tmp_path)
+    with caplog.at_level(logging.INFO, logger="comfyui-tts-api"):
+        manager._relay_events()
+    lines = [item.getMessage() for item in caplog.records
+             if item.name == "comfyui-tts-api"]
+    assert any("model.runtime.selected" in item and "device=cpu" in item
+               for item in lines)
+    assert any("model.quantization.started" in item and
+               "quantized_layers=37" in item for item in lines)
+    assert any("model.quantization.completed" in item and
+               "precision=int8" in item for item in lines)
+    assert secret not in (tmp_path / "data" / "operations.log").read_text()
+    assert not any(secret in item for item in lines)
