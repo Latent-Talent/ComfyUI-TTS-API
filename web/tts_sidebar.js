@@ -12,6 +12,7 @@ const SIDEBAR_SESSION_KEY = "latent-talent.tts-api.sidebar-session.v1";
 const SESSION_FIELDS = [
     "selected-model", "test-model", "test-language", "test-voice",
     "test-text", "test-delivery", "test-seed", "test-steps",
+    "test-runtime-device", "test-runtime-precision",
     "index-emo-mode", "index-emo-reference", "index-emo-strength",
     "index-duration", "voice-search",
     "design-model", "design-name", "design-description",
@@ -191,6 +192,22 @@ function template() {
           <option value="Portuguese">Portuguese</option>
           <option value="Russian">Russian</option>
         </select></label>
+        <div class="tts-section-title">Execution settings for this test</div>
+        <div class="tts-test-row">
+          <label>Device<select data-test-runtime-device>
+            <option value="">Use saved model default</option>
+            <option value="auto">Auto (CUDA preferred)</option>
+            <option value="cpu">CPU</option>
+            <option value="cuda">CUDA GPU</option>
+          </select></label>
+          <label>Precision<select data-test-runtime-precision>
+            <option value="">Use saved model default</option>
+            <option value="native">Native</option>
+            <option value="int8">INT8 W8A8 (experimental)</option>
+          </select></label>
+        </div>
+        <p class="tts-hint" data-test-runtime-summary role="status" aria-live="polite">Loading saved CPU/GPU and quantization settings…</p>
+        <p class="tts-hint" data-test-runtime-status role="status" aria-live="polite">No model loaded yet.</p>
         <label>Character voice<select data-test-voice><option value="default">Default voice</option></select></label>
         <label>Text<textarea data-test-text rows="5">Hello! This is a test of my local text to speech server.</textarea></label>
         <label>Delivery instructions (optional)<textarea data-test-delivery rows="2" placeholder="Warm and relaxed"></textarea></label>
@@ -348,6 +365,8 @@ function mount(container) {
             indexAccordion: $("[data-index-emotion]").open,
             containerScroll: container.scrollTop,
             rootScroll: root.scrollTop,
+            panelScrolls: Object.fromEntries([...root.querySelectorAll("[data-panel]")]
+                .map((panel) => [panel.dataset.panel, panel.scrollTop])),
         };
         // Generated audio is kept in memory only, never in browser storage.
         savedSidebarSession = {...snapshot, lastAudioBlob};
@@ -412,6 +431,7 @@ function mount(container) {
             if (input) input.value = value;
         }
         updateEmotionControls();
+        updateTestRuntimeSummary();
         showVoices();
         root.querySelectorAll('[data-panel="voices"] > details').forEach((details, index) => {
             details.open = Boolean(snapshot.voiceAccordions?.[index]);
@@ -436,6 +456,9 @@ function mount(container) {
             if (!destroyed) {
                 container.scrollTop = Number(snapshot.containerScroll) || 0;
                 root.scrollTop = Number(snapshot.rootScroll) || 0;
+                for (const panel of root.querySelectorAll("[data-panel]")) {
+                    panel.scrollTop = Number(snapshot.panelScrolls?.[panel.dataset.panel]) || 0;
+                }
             }
         });
         updateModelDownloadButton();
@@ -889,6 +912,45 @@ function mount(container) {
         return {model_id: modelId, settings: values};
     }
 
+    function testRuntimeOptions() {
+        const modelId = $("[data-test-model]").value;
+        const saved = defaultsByModel[modelId]?.values || {};
+        return {
+            savedDevice: saved.runtime_device || "auto",
+            savedPrecision: saved.runtime_precision || "native",
+            device: $("[data-test-runtime-device]").value ||
+                saved.runtime_device || "auto",
+            precision: $("[data-test-runtime-precision]").value ||
+                saved.runtime_precision || "native",
+        };
+    }
+
+    function updateTestRuntimeSummary() {
+        const modelId = $("[data-test-model]").value;
+        const saved = defaultsByModel[modelId]?.values;
+        const summary = $("[data-test-runtime-summary]");
+        if (!saved) {
+            summary.textContent = "Model defaults unavailable. Reconnect the TTS API.";
+            return;
+        }
+        const configured = testRuntimeOptions();
+        const labelDevice = (value) => value === "cpu" ? "CPU"
+            : value === "cuda" ? "CUDA GPU" : "Auto (CUDA preferred)";
+        const labelPrecision = (value) => value === "int8" ? "INT8 W8A8" : "Native";
+        summary.textContent = "Saved model default: " +
+            labelDevice(configured.savedDevice) + " · " +
+            labelPrecision(configured.savedPrecision) + ". This test will use: " +
+            labelDevice(configured.device) + " · " +
+            labelPrecision(configured.precision) +
+            ($("[data-test-runtime-device]").value ||
+             $("[data-test-runtime-precision]").value
+                ? " (test-only overrides; saved API settings unchanged)." : ".");
+        const device = $("[data-test-runtime-device]");
+        const precision = $("[data-test-runtime-precision]");
+        device.options[0].textContent = "Saved: " + labelDevice(configured.savedDevice);
+        precision.options[0].textContent = "Saved: " + labelPrecision(configured.savedPrecision);
+    }
+
     function applyTestDefaults() {
         const profile = defaultsByModel[$("[data-test-model]").value];
         if (!profile) return;
@@ -928,6 +990,7 @@ function mount(container) {
             voice.value = configuredVoice;
         }
         updateEmotionControls();
+        updateTestRuntimeSummary();
     }
 
     async function refreshModelDefaults() {
@@ -1395,9 +1458,12 @@ function mount(container) {
         "Speech API is restarting."));
     $("[data-test-model]").addEventListener("change", () => {
         updateTestModelNote();
+        updateTestRuntimeSummary();
         refreshVoices().then(applyTestDefaults)
             .catch((err) => feedback(err.message, true));
     });
+    root.querySelectorAll("[data-test-runtime-device], [data-test-runtime-precision]")
+        .forEach((element) => element.addEventListener("change", updateTestRuntimeSummary));
     $("[data-selected-model]").addEventListener("change", () => {
         updateModelDownloadButton();
         renderModelDefaults();
@@ -1415,7 +1481,10 @@ function mount(container) {
             defaultsByModel[payload.model_id].values = response.settings;
             renderModelDefaults(true);
             await refreshVoices();
-            if ($("[data-test-model]").value === payload.model_id) applyTestDefaults();
+            if ($("[data-test-model]").value === payload.model_id) {
+                applyTestDefaults();
+                updateTestRuntimeSummary();
+            }
         }, "Defaults saved for this model. New API requests use them unless explicitly overridden."
     ));
     $("[data-action=reset-model-defaults]").addEventListener("click", (e) => perform(
@@ -1427,7 +1496,10 @@ function mount(container) {
             })).json();
             defaultsByModel[modelId].values = response.settings;
             renderModelDefaults(true);
-            if ($("[data-test-model]").value === modelId) applyTestDefaults();
+            if ($("[data-test-model]").value === modelId) {
+                applyTestDefaults();
+                updateTestRuntimeSummary();
+            }
         }, "Built-in defaults restored for this model."
     ));
     $("[data-index-emo-mode]").addEventListener("change", updateEmotionControls);
@@ -1597,6 +1669,17 @@ function mount(container) {
                     ? null : Number($("[data-test-seed]").value),
                 steps: Number($("[data-test-steps]").value),
             };
+            // Omitted runtime fields tell both the Test and OpenAI API to use
+            // the selected model's *saved* CPU/precision settings.
+            const testDevice = $("[data-test-runtime-device]").value;
+            const testPrecision = $("[data-test-runtime-precision]").value;
+            if (testDevice) body.runtime_device = testDevice;
+            if (testPrecision) body.runtime_precision = testPrecision;
+            const actual = testRuntimeOptions();
+            $("[data-test-runtime-status]").textContent =
+                "Generating speech with " + actual.device.toUpperCase() +
+                " · " + (actual.precision === "int8" ? "INT8 W8A8" : "Native") +
+                ". Loading/quantization progress will appear here.";
             if (body.model === "indextts-2.5") {
                 body.emotion_mode = $("[data-index-emo-mode]").value;
                 body.emotion_strength = Number($("[data-index-emo-strength]").value);
