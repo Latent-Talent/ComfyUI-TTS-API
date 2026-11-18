@@ -48,7 +48,17 @@ function rememberComfyuiSession(instanceId) {
 }
 
 async function request(path, options = {}) {
-    const response = await api.fetchApi(ROUTE + path, options);
+    // ComfyUI's fetchApi normally times out while waiting for response headers
+    // (~60 seconds on current frontends). Cold TTS weight loading, quantization,
+    // queue waiting and synthesis may take much longer. The same-origin aiohttp
+    // gateway already applies its own bounded upstream timeout (~32 minutes).
+    // Disable only the frontend's shorter timeout for long-running operations;
+    // keep its default behavior for status, settings and other quick requests.
+    const longRunning = path === "/speech" || path === "/voices/design";
+    const fetchOptions = longRunning
+        ? {...options, timeoutMs: null}
+        : options;
+    const response = await api.fetchApi(ROUTE + path, fetchOptions);
     if (!response.ok) {
         let detail = "HTTP " + response.status;
         try {
