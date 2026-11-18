@@ -95,3 +95,23 @@ test("corrupt or disabled sessionStorage does not throw", () => {
     client.clearSidebarSession();
     assert.equal(storage.has(client.SIDEBAR_SESSION_KEY), false);
 });
+
+test("Test panel exposes CPU/GPU and INT8 controls that inherit model defaults", () => {
+    assert.match(source, /data-test-runtime-device/);
+    assert.match(source, /data-test-runtime-precision/);
+    assert.match(source, /data-test-runtime-summary/);
+    assert.match(source, /data-test-runtime-status/);
+    assert.match(source, /if \(testDevice\) body\.runtime_device = testDevice;/);
+    assert.match(source, /if \(testPrecision\) body\.runtime_precision = testPrecision;/);
+    const fields = build(new Map()).SESSION_FIELDS;
+    assert.ok(fields.includes("test-runtime-device"));
+    assert.ok(fields.includes("test-runtime-precision"));
+});
+
+test("all three sidebar panes have independent constrained scrolling", () => {
+    const css = readFileSync(join(process.cwd(), "web/tts_sidebar.css"), "utf8");
+    assert.match(css, /\.tts-sidebar-host\s*\{/);
+    assert.match(css, /\.tts-ui \.tts-panel\s*\{[^}]*overflow-y: auto/s);
+    assert.match(css, /\.tts-ui \.tts-panel\s*\{[^}]*min-height: 0/s);
+    assert.match(source, /panelScrolls:/);
+});
