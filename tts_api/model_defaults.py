@@ -32,6 +32,16 @@ def field(name: str, label: str, kind: str, default, **options) -> dict:
 
 def common_fields(*, include_voice: bool = True) -> list[dict]:
     fields = [
+        field("runtime_device", "Execution device", "select", "auto",
+              options=["auto", "cpu", "cuda"],
+              hint="Auto selects CUDA when available. CPU uses system memory."),
+        field("runtime_precision", "Model precision", "select", "native",
+              options=["native", "int8"],
+              hint="INT8 (experimental): TorchAO dynamic-activation W8A8 linear layers; "
+                   "other layers remain at native precision. Converted on model load."),
+        field("runtime_cpu_threads", "CPU inference threads (0 = PyTorch auto)",
+              "integer", 0, min=0, max=256,
+              hint="Use 0 for the PyTorch default. Start near physical CPU cores."),
         field("response_format", "Audio format", "select", "mp3", options=list(FORMATS)),
         field("speed", "Playback speed", "number", 1.0, min=0.25, max=4.0, step=0.05),
         field("seed", "Seed (blank = random)", "nullable_integer", None,
