@@ -85,6 +85,7 @@ function template() {
           <div><span>API version</span><strong data-version>Unknown</strong></div>
           <div><span>API</span><strong data-service>Checking</strong></div>
           <div><span>Model memory</span><strong data-memory>Not loaded</strong></div>
+          <div><span>Execution</span><strong data-runtime>Not loaded</strong></div>
           <div><span>CUDA allocator</span><strong data-allocator>Native</strong></div>
           <div><span>Idle unload</span><strong data-idle>60s</strong></div>
           <div><span>ComfyUI queue</span><strong data-queue>Checking</strong></div>
@@ -611,13 +612,15 @@ function mount(container) {
             } else if (spec.kind === "select") {
                 control = document.createElement("select");
                 spec.options.forEach((choice) => {
-                    const text = spec.name === "emotion_mode" ? ({
-                        neutral: "Neutral",
-                        auto: "Automatic emotion analysis",
-                        text: "Emotion description",
-                        vector: "Manual emotion vector",
-                        reference: "Reference audio",
-                    }[choice] || choice) : choice;
+                    const names = {
+                        emotion_mode: {neutral: "Neutral", auto: "Automatic emotion analysis",
+                            text: "Emotion description", vector: "Manual emotion vector",
+                            reference: "Reference audio"},
+                        runtime_device: {auto: "Auto (CUDA preferred)", cpu: "CPU", cuda: "CUDA GPU"},
+                        runtime_precision: {native: "Native (BF16 / FP32)",
+                            int8: "INT8 (W8A8 · experimental)"},
+                    };
+                    const text = names[spec.name]?.[choice] || choice;
                     control.add(new Option(text, choice));
                 });
                 control.value = String(value);
@@ -854,7 +857,16 @@ function mount(container) {
             : "Selecting a default restarts only the TTS service. Models are stored under ComfyUI/models/TTS.";
         $("[data-action=apply-model]").disabled = result.active_model_editable === false;
         $("[data-version]").textContent = h?.version || "Older release";
-        $("[data-memory]").textContent = !ok ? "Unavailable" : h.paused ? "Released / paused" : h.loaded ? "Loaded in VRAM" : "Unloaded";
+        const runtime = h?.runtime;
+        const device = runtime?.device || "unknown";
+        $("[data-memory]").textContent = !ok ? "Unavailable" : h.paused
+            ? "Released / paused" : !h.loaded ? "Unloaded"
+            : device === "cpu" ? "Loaded in RAM" : device === "auto" ? "Loaded" : "Loaded in VRAM";
+        $("[data-runtime]").textContent = !ok ? "Unavailable" : !runtime
+            ? "Not loaded"
+            : (device === "cuda:0" ? "CUDA" : device.toUpperCase()) +
+              " · " + (runtime.precision === "int8" ? "INT8 W8A8" : "Native") +
+              (runtime.precision === "int8" ? " · " + runtime.int8_layers + " layers" : "");
         $("[data-allocator]").textContent = h?.cuda_allocator || "Unknown";
         $("[data-idle]").textContent = result.config.idle_unload_seconds === 0
             ? "Disabled" : result.config.idle_unload_seconds + "s";
