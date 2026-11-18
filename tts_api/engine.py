@@ -128,7 +128,7 @@ class VoxEngine:
 
     def _load(self) -> None:
         if self._model is None:
-            require_queue_reservation()
+            require_queue_reservation(self._runtime["device"])
             self._loading_stage = "Loading VoxCPM2 model weights"
             emit("model.load.started", backend="voxcpm2", model="voxcpm2",
                  kind=active_request_kind(), device=self._runtime["device"],
@@ -380,9 +380,9 @@ class VoxEngine:
             raise ValueError("Input text cannot be empty.")
         # A loaded model cannot be used from a background path outside the
         # scheduled queue slot, even when no fresh model load is needed.
-        require_queue_reservation()
+        require_queue_reservation(self._runtime["device"])
         with self._lock:
-            if self._paused:
+            if self._paused and self._runtime["device"] != "cpu":
                 raise RuntimeError("TTS is paused while ComfyUI needs GPU memory")
             self.last_error = None
             try:
