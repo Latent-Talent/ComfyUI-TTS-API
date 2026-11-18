@@ -31,6 +31,8 @@ EVENTS = frozenset({
     "voice.design.started", "voice.design.completed", "voice.design.failed",
     "voice.clone.saved", "voice.updated", "voice.deleted",
     "model.load.started", "model.load.completed", "model.load.failed",
+    "model.runtime.selected", "model.quantization.started",
+    "model.quantization.completed", "model.quantization.failed",
     "model.unloaded", "model.switch", "model.idle_unloaded",
     "generation.started", "generation.completed", "generation.failed",
     "style.reference.started", "style.reference.cached",
@@ -40,11 +42,13 @@ EVENTS = frozenset({
 })
 
 # Only these keys may cross the log boundary. No arbitrary values or keys.
-INT_FIELDS = {"characters", "audio_bytes", "sample_rate", "steps"}
+INT_FIELDS = {"characters", "audio_bytes", "sample_rate", "steps", "quantized_layers"}
 FLOAT_FIELDS = {"elapsed_ms", "audio_seconds", "rtf"}
 BOOL_FIELDS = {"cached", "has_reference", "has_instructions", "audio_replaced"}
 STRING_FIELDS = {
     "model": r"^[a-zA-Z0-9_.-]{1,80}$",
+    "device": r"^(auto|cpu|cuda|cuda:[0-9]{1,2})$",
+    "precision": r"^(native|int8)$",
     "backend": r"^(voxcpm2|qwen3-tts|indextts)$",
     "voice_type": r"^(default|preset|saved|openai_alias)$",
     "status": r"^(ok|error|paused|idle|starting|running)$",
