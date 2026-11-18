@@ -28,6 +28,8 @@ class RuntimeSpy:
     quantized_layers = 0
     paused = False
     last_error = None
+    optimize = False
+    compile_fallback_used = False
 
     def __init__(self):
         self.runtime_calls = []
