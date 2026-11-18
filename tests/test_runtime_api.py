@@ -144,3 +144,27 @@ def test_runtime_status_reports_loading_without_sensitive_content(monkeypatch):
     assert data["loading"]["precision"] == "int8"
     assert data["loading"]["stage"] == "Converting eligible VoxCPM2 layers to INT8 W8A8"
     assert "input" not in data["loading"]
+
+
+def test_indextts_api_inherits_saved_cpu_int8_without_test_override(
+        tmp_path, monkeypatch):
+    from tts_api.models import INDEX_ID
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    store = server.VoiceStore(tmp_path / "voices")
+    recording = store.create(name="Reference", reference=wav())
+    monkeypatch.setattr(server, "STORE", store)
+    monkeypatch.setattr(server, "KEY", "")
+    index = RuntimeSpy()
+    monkeypatch.setattr(server, "INDEX_ENGINE", index)
+    save_defaults(tmp_path, INDEX_ID, {
+        "voice": recording["id"], "runtime_device": "cpu",
+        "runtime_precision": "int8", "runtime_cpu_threads": 8,
+        "response_format": "wav",
+    })
+    response = TestClient(server.app).post("/v1/audio/speech", json={
+        "model": INDEX_ID, "input": "IndexTTS on CPU", "response_format": "wav",
+    })
+    assert response.status_code == 200, response.text
+    assert index.runtime_calls[-1] == {
+        "device": "cpu", "precision": "int8", "cpu_threads": 8,
+    }
