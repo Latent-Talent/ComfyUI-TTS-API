@@ -315,6 +315,7 @@ async function recordedAudioToWav(blob) {
 
 function mount(container) {
     if (activePanel) activePanel.destroy();
+    container.classList.add("tts-sidebar-host");
     container.innerHTML = template();
     const root = container.querySelector(".tts-ui");
     let timer = null;
