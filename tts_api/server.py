@@ -160,6 +160,10 @@ class SpeechRequest(BaseModel):
     emotion_strength: float = Field(default=0.65, ge=0, le=1)
     emotion_reference_voice: str | None = Field(default=None, max_length=120)
     duration_factor: float = Field(default=1.0, ge=0.5, le=2.0)
+    # Optional request-scoped runtime overrides; omission uses model defaults.
+    # Test tab can experiment without altering the API's saved configuration.
+    runtime_device: Literal["auto", "cpu", "cuda"] | None = None
+    runtime_precision: Literal["native", "int8"] | None = None
 
 
 class DesignRequest(BaseModel):
@@ -221,6 +225,17 @@ def _resolve_voice(value: str, *, backend: str = VOX_ID) -> dict | None:
     )
 
 
+def speech_runtime(request: SpeechRequest, model_id: str | None = None) -> dict:
+    """Saved model settings apply to every API caller unless explicitly overridden."""
+    selected = model_id or canonical_model(request.model, ACTIVE_MODEL, MODEL)
+    settings = effective_defaults(ROOT, selected)
+    for name in ("runtime_device", "runtime_precision"):
+        value = getattr(request, name, None)
+        if value is not None:
+            settings[name] = value
+    return runtime_options(settings)
+
+
 def _render(request: SpeechRequest) -> bytes:
     if len(request.input) > MAX_TEXT:
         raise ValueError(f"Input longer than {MAX_TEXT} characters")
@@ -237,7 +252,11 @@ def _render(request: SpeechRequest) -> bytes:
 
     # All backend switching occurs inside this serialized section.
     # Runtime controls are server-side model defaults, not OpenAI speech fields.
-    runtime = runtime_options(effective_defaults(ROOT, model_id))
+    runtime = speech_runtime(request, model_id)
+    emit("model.runtime.selected", model=model_id,
+         backend="indextts" if is_index(model_id) else
+                 ("qwen3-tts" if is_qwen(model_id) else "voxcpm2"),
+         device=runtime["device"], precision=runtime["precision"])
     with INFERENCE_LOCK:
         if is_index(model_id):
             if not ref:
@@ -312,6 +331,18 @@ def _render(request: SpeechRequest) -> bytes:
 async def health():
     qwen_running = QWEN_ENGINE.loaded
     index_running = INDEX_ENGINE.loaded
+    loading = next((
+        {"backend": backend, "model": model,
+         "stage": engine._loading_stage,
+         "device": engine._runtime["device"],
+         "precision": engine._runtime["precision"]}
+        for engine, backend, model in (
+            (INDEX_ENGINE, "indextts", INDEX_ID),
+            (QWEN_ENGINE, "qwen3-tts", QWEN_ENGINE._model_id or "qwen3-tts"),
+            (ENGINE, "voxcpm2", VOX_ID),
+        )
+        if getattr(engine, "_loading_stage", None)
+    ), None)
     return {
         "ok": True, "service": "comfyui-tts-api", "version": app.version,
         "model": ACTIVE_MODEL, "active_model": ACTIVE_MODEL,
@@ -334,6 +365,7 @@ async def health():
             os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "backend:native"),
         ),
         "loaded": ENGINE.loaded or qwen_running or index_running,
+        "loading": loading,
         "runtime": (
             {"device": INDEX_ENGINE._resolved_device,
              "precision": INDEX_ENGINE._runtime["precision"],
