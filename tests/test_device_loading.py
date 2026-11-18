@@ -24,7 +24,7 @@ def test_voxcpm_explicit_cpu_reaches_loader_and_triggers_int8(monkeypatch):
     voxcpm.VoxCPM = types.SimpleNamespace(from_pretrained=lambda *a, **k:
         (calls.append(("load", a, k)) or types.SimpleNamespace(tts_model=core)))
     monkeypatch.setitem(sys.modules, "voxcpm", voxcpm)
-    monkeypatch.setattr(module, "require_queue_reservation", lambda: None)
+    monkeypatch.setattr(module, "require_queue_reservation", lambda device: None)
     monkeypatch.setattr(module, "release_unused_cuda", lambda: None)
     monkeypatch.setattr(module, "require_int8_backend", lambda: None)
     monkeypatch.setattr(module, "quantize_int8", lambda target, **kwargs:
@@ -60,7 +60,7 @@ def test_qwen_explicit_cpu_reaches_loader_and_triggers_int8(monkeypatch):
     qwen.Qwen3TTSModel = types.SimpleNamespace(from_pretrained=lambda *a, **k:
         (calls.append(("load", a, k)) or wrapper))
     monkeypatch.setitem(sys.modules, "qwen_tts", qwen)
-    monkeypatch.setattr(module, "require_queue_reservation", lambda: None)
+    monkeypatch.setattr(module, "require_queue_reservation", lambda device: None)
     monkeypatch.setattr(module, "release_unused_cuda", lambda: None)
     monkeypatch.setattr(module, "require_int8_backend", lambda: None)
     monkeypatch.setattr(module, "quantize_int8", lambda t, **kwargs:
