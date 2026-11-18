@@ -1,7 +1,5 @@
-"""Pure Node regression checks for sidebar session persistence without ComfyUI.
-
-Tests reuse the real sidebar module code, with only the ComfyUI imports stubbed.
-"""
+/* Pure Node regression checks for sidebar session persistence without ComfyUI.
+   Tests reuse the real sidebar module code, with only the ComfyUI imports stubbed. */
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {join} from "node:path";
