@@ -21,6 +21,7 @@ import soundfile as sf
 from .operations import emit
 from .comfy_queue import active_request_kind, require_queue_reservation
 from .memory import is_memory_exhaustion, release_unused_cuda
+from .runtime import apply_cpu_threads, quantize_int8, resolve_device, runtime_options
 
 LOG = logging.getLogger("comfyui-tts-api.engine")
 
@@ -53,6 +54,16 @@ class VoxEngine:
         self._paused = False
         self._retain_model_depth = 0
         self._last_activity = time.monotonic()
+        self._runtime = runtime_options({})
+        self._resolved_device = None
+        self.quantized_layers = 0
+
+    def configure_runtime(self, settings: dict) -> None:
+        config = runtime_options(settings)
+        with self._lock:
+            if config != self._runtime:
+                self._unload_locked()
+                self._runtime = config
 
     @property
     def paused(self) -> bool:
@@ -62,6 +73,8 @@ class VoxEngine:
         previously_loaded = self._model is not None
         model = self._model
         self._model = None
+        self._resolved_device = None
+        self.quantized_layers = 0
         del model
         # This process owns its allocator; ComfyUI's CUDA context is separate.
         release_unused_cuda()
@@ -118,20 +131,38 @@ class VoxEngine:
                  kind=active_request_kind())
             load_started = time.perf_counter()
             try:
+                import torch
                 from voxcpm import VoxCPM
+                device = resolve_device(self._runtime["device"], torch)
+                apply_cpu_threads(torch, self._runtime["cpu_threads"], device)
+                # Quantize the uncompiled model; compiled CUDA graphs may retain
+                # stale pointers when a Linear is replaced by a quantized one.
+                optimized = (self.optimize and device.startswith("cuda") and
+                             self._runtime["precision"] == "native")
                 self._model = VoxCPM.from_pretrained(
-                    self.model_name, load_denoiser=False, optimize=self.optimize
+                    self.model_name, load_denoiser=False, optimize=optimized,
+                    device=device,
                 )
+                if self._runtime["precision"] == "int8":
+                    target = getattr(self._model, "tts_model", None)
+                    if target is None or not hasattr(target, "named_modules"):
+                        raise RuntimeError("VoxCPM model does not expose its Torch modules for INT8")
+                    self.quantized_layers = quantize_int8(target, scope="voxcpm", torch=torch)
+                self._resolved_device = device
             except Exception as exc:
                 # from_pretrained may allocate CUDA tensors before raising,
                 # even when self._model has never been assigned.
                 self._model = None
+                self._resolved_device = None
+                self.quantized_layers = 0
                 release_unused_cuda()
                 emit("model.load.failed", backend="voxcpm2",
                      model="voxcpm2", error_type=type(exc).__name__,
                      elapsed_ms=(time.perf_counter() - load_started) * 1000)
                 raise
             emit("model.load.completed", backend="voxcpm2", model="voxcpm2",
+                 device=self._resolved_device, precision=self._runtime["precision"],
+                 quantized_layers=self.quantized_layers,
                  elapsed_ms=(time.perf_counter() - load_started) * 1000)
 
     def unload(self) -> None:
