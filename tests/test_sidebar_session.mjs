@@ -7,7 +7,9 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = readFileSync(join(process.cwd(), "web/tts_sidebar.js"), "utf8")
-    .replace(/^import .*;\s*$/gm, "");
+    .replace(/^import .*;\s*$/gm, "")
+    // vm.Script is not an ES module; replace metadata in the unused CSS setup.
+    .replaceAll("import.meta.url", JSON.stringify("file:///mock/tts_sidebar.js"));
 
 function build(storage) {
     const window = {
