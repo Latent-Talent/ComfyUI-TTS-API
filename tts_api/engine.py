@@ -21,7 +21,7 @@ import soundfile as sf
 from .operations import emit
 from .comfy_queue import active_request_kind, require_queue_reservation
 from .memory import is_memory_exhaustion, release_unused_cuda
-from .runtime import apply_cpu_threads, quantize_int8, resolve_device, runtime_options
+from .runtime import apply_cpu_threads, quantize_int8, require_int8_backend, resolve_device, runtime_options
 
 LOG = logging.getLogger("comfyui-tts-api.engine")
 
@@ -141,6 +141,8 @@ class VoxEngine:
                     import torch
                     device = resolve_device(self._runtime["device"], torch)
                     apply_cpu_threads(torch, self._runtime["cpu_threads"], device)
+                if self._runtime["precision"] == "int8":
+                    require_int8_backend()
                 # Quantize the uncompiled model; compiled CUDA graphs may retain
                 # stale pointers when a Linear is replaced by a quantized one.
                 optimized = (self.optimize and
