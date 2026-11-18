@@ -42,6 +42,7 @@ class QwenEngine:
         self._runtime = runtime_options({})
         self._resolved_device = None
         self.quantized_layers = 0
+        self._loading_stage = None
 
     @property
     def loaded(self) -> bool:
@@ -70,6 +71,7 @@ class QwenEngine:
         self._model_id = None
         self._resolved_device = None
         self.quantized_layers = 0
+        self._loading_stage = None
         del model
         release_unused_cuda()
         self._last_activity = time.monotonic()
@@ -133,17 +135,21 @@ class QwenEngine:
         if self._runtime["precision"] == "int8":
             require_int8_backend()
         repo = QWEN_MODELS[model_id]["repo"]
+        self._loading_stage = "Loading Qwen model weights"
         emit("model.load.started", backend="qwen3-tts", model=model_id,
-             kind=active_request_kind())
+             kind=active_request_kind(), device=device,
+             precision=self._runtime["precision"])
         started = time.perf_counter()
         try:
             self._model = Qwen3TTSModel.from_pretrained(repo, **kwargs)
             if self._runtime["precision"] == "int8":
+                self._loading_stage = "Converting eligible Qwen layers to INT8 W8A8"
                 target = getattr(self._model, "model", None)
                 if target is None or not hasattr(target, "named_modules"):
                     raise RuntimeError("This Qwen-TTS package does not expose its Torch model for INT8")
                 self.quantized_layers = quantize_int8(target, scope="qwen", torch=torch)
             self._resolved_device = device
+            self._loading_stage = None
         except Exception as exc:
             # Failed HF loads may have created temporary CUDA allocations
             # without ever assigning a fully constructed model to self.
@@ -151,6 +157,7 @@ class QwenEngine:
             self._model_id = None
             self._resolved_device = None
             self.quantized_layers = 0
+            self._loading_stage = None
             self._prompt_cache.clear()
             release_unused_cuda()
             emit("model.load.failed", backend="qwen3-tts", model=model_id,
