@@ -10,6 +10,7 @@ import json
 import hmac
 import logging
 import os
+import secrets
 from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, web
@@ -20,6 +21,9 @@ from .queue_bridge import BROKER
 LOG = logging.getLogger("comfyui-tts-api")
 BASE = "/tts-api"
 REQUEST_TIMEOUT = ClientTimeout(total=1950, connect=8)
+# Unique to this ComfyUI Python process, not the independently restarting TTS API.
+# The browser uses this to discard sidebar form state after ComfyUI restarts.
+COMFYUI_SESSION_ID = secrets.token_urlsafe(18)
 
 
 def _headers() -> dict[str, str]:
@@ -94,6 +98,7 @@ async def _forward(method: str, path: str, *, payload=None, multipart=None,
 async def status(_request: web.Request) -> web.Response:
     installed = _MANAGER._python().is_file()
     result = {
+        "comfyui_session": COMFYUI_SESSION_ID,
         "installed": installed,
         "managed": not _MANAGER._disabled,
         "running": _MANAGER._running(),
