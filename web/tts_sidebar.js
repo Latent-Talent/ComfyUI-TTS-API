@@ -1771,15 +1771,25 @@ function mount(container) {
         if (destroyed) return;
 
         const snapshot = savedSidebarSession || storedSidebarSession();
+        let restored = false;
         if (sessionVerified && snapshot &&
             snapshot.comfyuiSession === comfyuiSessionId) {
             await restoreSidebarSession(snapshot);
+            restored = true;
         } else if (sessionVerified && snapshot) {
             clearSidebarSession();
         }
         if (destroyed) return;
         initializing = false;
-        captureSidebarSession();
+        // restoreSidebarSession schedules scroll restoration on the next frame.
+        // Do not overwrite that snapshot with zero scroll offsets before it runs.
+        if (restored) {
+            window.requestAnimationFrame(() => {
+                if (!destroyed) captureSidebarSession();
+            });
+        } else {
+            captureSidebarSession();
+        }
     }
 
     initializeSidebar().catch((error) => {
