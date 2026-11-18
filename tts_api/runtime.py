@@ -105,14 +105,23 @@ def quantize_int8(module, *, scope: str, torch=None) -> int:
             "the model has not been quantized."
         )
     allowed = set(eligible)
+    from .operations import emit
+    backend = {"qwen": "qwen3-tts", "voxcpm": "voxcpm2",
+               "index": "indextts"}[scope]
+    emit("model.quantization.started", backend=backend, precision="int8",
+         quantized_layers=len(eligible))
     try:
         quantize_(
             module, Int8DynamicActivationInt8WeightConfig(),
             filter_fn=lambda layer, name: name in allowed,
         )
     except Exception as exc:
+        emit("model.quantization.failed", backend=backend, precision="int8",
+             error_type=type(exc).__name__)
         raise RuntimeError(
             f"TorchAO INT8 conversion failed for {scope} ({type(exc).__name__}). "
             "Choose Native precision or use a compatible TorchAO version."
         ) from exc
+    emit("model.quantization.completed", backend=backend, precision="int8",
+         quantized_layers=len(eligible))
     return len(eligible)
