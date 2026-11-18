@@ -33,7 +33,7 @@ from .model_storage import (
 from .model_defaults import all_defaults, effective_defaults, save_defaults
 from .memory import process_cuda_memory
 from .runtime import runtime_options
-from .comfy_queue import QueueUnavailable, queued_tts
+from .comfy_queue import QueueUnavailable, queued_tts, cpu_tts
 from .operations import REQUEST_ID, configure as configure_operations, emit
 from .models import (
     VOX_ID, QWEN_DEFAULT, QWEN_DESIGN, QWEN_MODELS, QWEN_SPEAKERS,
@@ -418,22 +418,20 @@ def _unload_both():
 
 
 def _reclaim_idle_gpu() -> tuple[bool, bool]:
-    """Reclaim cached TTS models without pausing the API worker.
+    """Reclaim only GPU-backed weights; keep resident CPU models intact.
 
-    A managed TTS request is only allowed to generate after its ComfyUI queue
-    reservation runs, so a normal workflow doesn't need to pause an idle
-    speech service. Nonblocking acquisition prevents reclaim from waiting
-    for or silently interrupting a generation already in progress.
+    ComfyUI GPU workflows must not unload CPU-only weights. A nonblocking
+    lock still protects against interrupting active CPU or CUDA inference.
     """
     if not INFERENCE_LOCK.acquire(blocking=False):
         return False, False
     try:
-        was_loaded = ENGINE.loaded or QWEN_ENGINE.loaded or INDEX_ENGINE.loaded
-        if was_loaded:
-            ENGINE.unload()
-            QWEN_ENGINE.unload()
-            INDEX_ENGINE.unload()
-        return True, was_loaded
+        reclaimed = False
+        for engine in (ENGINE, QWEN_ENGINE, INDEX_ENGINE):
+            if engine.loaded and engine._resolved_device != "cpu":
+                engine.unload()
+                reclaimed = True
+        return True, reclaimed
     finally:
         INFERENCE_LOCK.release()
 
@@ -626,10 +624,12 @@ async def speech(request: SpeechRequest):
         request = apply_speech_defaults(request)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    # Actual ComfyUI output-node job occupies a queue position until the
-    # complete audio response is prepared, including FFmpeg conversion.
+    # Explicit CPU inference is independent of GPU scheduling. Auto/CUDA
+    # still occupies a real ComfyUI reservation through output conversion.
     try:
-        async with queued_tts("speech"):
+        runtime = speech_runtime(request)
+        context = cpu_tts("speech") if runtime["device"] == "cpu" else queued_tts("speech")
+        async with context:
             return await _speech_in_queue(request)
     except QueueUnavailable as exc:
         raise HTTPException(409, str(exc)) from None
@@ -785,7 +785,10 @@ async def design_voice(request: DesignRequest):
         }
         if design_omitted:
             request = request.model_copy(update=design_omitted)
-        async with queued_tts("voice_design"):
+        runtime = runtime_options(effective_defaults(ROOT, model_id))
+        context = (cpu_tts("voice_design") if runtime["device"] == "cpu"
+                   else queued_tts("voice_design"))
+        async with context:
             return await _design_voice_in_queue(request)
     except QueueUnavailable as exc:
         raise HTTPException(409, str(exc)) from None
