@@ -138,8 +138,10 @@ def test_model_load_event_identifies_authorized_request_kind(monkeypatch):
         assert engine.loaded
 
     asyncio.run(run())
-    assert ("model.load.started", {
-        "backend": "voxcpm2",
-        "model": "voxcpm2",
-        "kind": "voice_design",
-    }) in events
+    started = [meta for name, meta in events if name == "model.load.started"]
+    assert started
+    assert started[-1]["backend"] == "voxcpm2"
+    assert started[-1]["model"] == "voxcpm2"
+    assert started[-1]["kind"] == "voice_design"
+    assert started[-1]["device"] == "auto"
+    assert started[-1]["precision"] == "native"
