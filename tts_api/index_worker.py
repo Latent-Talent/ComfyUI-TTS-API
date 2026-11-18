@@ -79,6 +79,8 @@ def main() -> int:
             apply_cpu_threads(torch, int(os.environ.get("TTS_INDEX_CPU_THREADS", "0")), device)
             if precision == "int8":
                 require_int8_backend()
+            _send(connection, {"event": "progress",
+                               "stage": "Loading IndexTTS model weights"})
             model = IndexTTS2(
                 cfg_path=str(checkpoints / "config.yaml"),
                 model_dir=str(checkpoints),
@@ -89,6 +91,8 @@ def main() -> int:
             )
             converted = 0
             if precision == "int8":
+                _send(connection, {"event": "progress",
+                                   "stage": "Converting IndexTTS GPT to INT8 W8A8"})
                 # Quantize the language model only; leave speech decoder, audio
                 # codec, BigVGAN and speaker analysis in their native precision.
                 converted = quantize_int8(model.gpt, scope="index", torch=torch)
