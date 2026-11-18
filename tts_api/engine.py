@@ -57,6 +57,7 @@ class VoxEngine:
         self._runtime = runtime_options({})
         self._resolved_device = None
         self.quantized_layers = 0
+        self._loading_stage = None
 
     def configure_runtime(self, settings: dict) -> None:
         config = runtime_options(settings)
@@ -75,6 +76,7 @@ class VoxEngine:
         self._model = None
         self._resolved_device = None
         self.quantized_layers = 0
+        self._loading_stage = None
         del model
         # This process owns its allocator; ComfyUI's CUDA context is separate.
         release_unused_cuda()
@@ -127,8 +129,10 @@ class VoxEngine:
     def _load(self) -> None:
         if self._model is None:
             require_queue_reservation()
+            self._loading_stage = "Loading VoxCPM2 model weights"
             emit("model.load.started", backend="voxcpm2", model="voxcpm2",
-                 kind=active_request_kind())
+                 kind=active_request_kind(), device=self._runtime["device"],
+                 precision=self._runtime["precision"])
             load_started = time.perf_counter()
             try:
                 from voxcpm import VoxCPM
@@ -154,17 +158,20 @@ class VoxEngine:
                     **kwargs,
                 )
                 if self._runtime["precision"] == "int8":
+                    self._loading_stage = "Converting eligible VoxCPM2 layers to INT8 W8A8"
                     target = getattr(self._model, "tts_model", None)
                     if target is None or not hasattr(target, "named_modules"):
                         raise RuntimeError("VoxCPM model does not expose its Torch modules for INT8")
                     self.quantized_layers = quantize_int8(target, scope="voxcpm", torch=torch)
                 self._resolved_device = device or "auto"
+                self._loading_stage = None
             except Exception as exc:
                 # from_pretrained may allocate CUDA tensors before raising,
                 # even when self._model has never been assigned.
                 self._model = None
                 self._resolved_device = None
                 self.quantized_layers = 0
+                self._loading_stage = None
                 release_unused_cuda()
                 emit("model.load.failed", backend="voxcpm2",
                      model="voxcpm2", error_type=type(exc).__name__,
