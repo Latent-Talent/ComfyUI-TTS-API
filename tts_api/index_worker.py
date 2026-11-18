@@ -70,15 +70,28 @@ def main() -> int:
         _send(connection, {"event": "hello", "token": token})
         try:
             import torch
+            from .runtime import apply_cpu_threads, quantize_int8, resolve_device
             from indextts.infer_v2_5 import IndexTTS2
+            device = resolve_device(os.environ.get("TTS_INDEX_DEVICE", "auto"), torch)
+            precision = os.environ.get("TTS_INDEX_PRECISION", "native")
+            if precision not in ("native", "int8"):
+                raise ValueError("Unsupported IndexTTS precision")
+            apply_cpu_threads(torch, int(os.environ.get("TTS_INDEX_CPU_THREADS", "0")), device)
             model = IndexTTS2(
                 cfg_path=str(checkpoints / "config.yaml"),
                 model_dir=str(checkpoints),
-                use_bf16=bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported()),
+                device=device,
+                use_bf16=bool(device.startswith("cuda") and torch.cuda.is_bf16_supported()),
                 use_cuda_kernel=False, use_deepspeed=False, use_accel=False,
                 use_torch_compile=False, use_qwen_emo=True,
             )
-            _send(connection, {"event": "ready"})
+            converted = 0
+            if precision == "int8":
+                # Quantize the language model only; leave speech decoder, audio
+                # codec, BigVGAN and speaker analysis in their native precision.
+                converted = quantize_int8(model.gpt, scope="index", torch=torch)
+            _send(connection, {"event": "ready", "device": device,
+                               "quantized_layers": converted})
         except BaseException as exc:
             _send(connection, {"event": "failed", "error_type": type(exc).__name__})
             return 4
