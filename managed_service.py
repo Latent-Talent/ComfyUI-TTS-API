@@ -542,7 +542,8 @@ class ManagedTTS:
                     # voice names and file paths are never forwarded.
                     for key in (
                         "model", "backend", "kind", "voice_type", "reason",
-                        "status", "characters", "audio_seconds", "audio_bytes",
+                        "status", "device", "precision", "quantized_layers",
+                        "characters", "audio_seconds", "audio_bytes",
                         "elapsed_ms", "error_type", "cached",
                     ):
                         value = record.get(key)
