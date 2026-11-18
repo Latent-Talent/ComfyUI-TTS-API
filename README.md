@@ -209,6 +209,12 @@ In **Voices → Clone voice from recording**, choose an audio file or click **Re
 
 The **Voices** sidebar tab now includes a searchable voice library. Click **View / Edit** on any saved voice to inspect its ID, description, reference transcript and listen to its existing reference audio. Edit metadata or select a replacement audio file (with permission confirmation) and click **Save voice changes**. The voice ID does not change, so existing SillyTavern assignments and model-default references remain valid. **Use in Test** chooses the voice in the Test tab. Delete warns when a model default references that voice. Reference audio is fetched only when requested, through the authenticated same-origin gateway; no voice data is embedded in queue entries or operational logs.
 
+### Cold-model load and request timeouts
+
+The ComfyUI frontend normally applies a short response-header timeout to `api.fetchApi` calls. For **Test → Generate speech** and **Voices → Design voice**, the sidebar disables only this short frontend timeout because downloading/loading an already installed model into RAM/VRAM, optional INT8 conversion and queue waiting can exceed one minute. The local same-origin gateway still has a bounded upstream request timeout (32.5 minutes). Other sidebar operations retain normal frontend timeout behavior.
+
+The memory coordinator also **does not terminate a live managed TTS worker** merely because HTTP reclaim and health probes time out during a cold model load. Actual child-process exits are still detected and restarted by the normal supervisor. This avoids aborting valid cold synthesis requests when CPU-heavy model initialization makes health checks temporarily slow.
+
 ## ComfyUI queue and GPU management
 
 Managed speech and voice-design requests configured with **Auto or CUDA** reserve an actual ComfyUI queue item. Earlier workflows run first; later workflows wait for TTS synthesis and audio encoding to finish. Requests explicitly configured with **CPU** (saved API defaults or a Test-tab override) bypass the ComfyUI queue entirely, so CPU speech can run while ComfyUI GPU jobs execute. CPU jobs remain serialized with other TTS requests inside the single TTS service process and may compete for system CPU and RAM resources.
