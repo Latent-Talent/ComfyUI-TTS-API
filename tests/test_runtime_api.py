@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from tts_api import server
 from tts_api.model_defaults import effective_defaults, save_defaults
 from tts_api.models import VOX_ID, QWEN_DEFAULT
+from tts_api.runtime import runtime_options
 
 
 def wav():
@@ -37,8 +38,10 @@ class RuntimeSpy:
         self._runtime = {"device": "auto", "precision": "native", "cpu_threads": 0}
 
     def configure_runtime(self, options):
-        self.runtime_calls.append(dict(options))
-        self._runtime = dict(options)
+        # Match the real engine's normalization; the old spy stored options
+        # directly and missed CPU/INT8 being reset to Auto/Native in engines.
+        self._runtime = runtime_options(options)
+        self.runtime_calls.append(dict(self._runtime))
 
     def generate_with_delivery(self, *args, **kwargs):
         return wav()
