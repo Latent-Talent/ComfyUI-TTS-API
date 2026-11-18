@@ -21,7 +21,7 @@ import soundfile as sf
 from .operations import emit
 from .comfy_queue import active_request_kind, require_queue_reservation
 from .memory import is_memory_exhaustion, release_unused_cuda
-from .runtime import apply_cpu_threads, quantize_int8, resolve_device, runtime_options
+from .runtime import apply_cpu_threads, quantize_int8, require_int8_backend, resolve_device, runtime_options
 
 from .models import QWEN_MODELS, QWEN_SPEAKERS_LOOKUP
 
@@ -130,6 +130,8 @@ class QwenEngine:
             "dtype": torch.bfloat16 if is_cuda else torch.float32,
             "attn_implementation": "sdpa" if is_cuda else "eager",
         }
+        if self._runtime["precision"] == "int8":
+            require_int8_backend()
         repo = QWEN_MODELS[model_id]["repo"]
         emit("model.load.started", backend="qwen3-tts", model=model_id,
              kind=active_request_kind())
