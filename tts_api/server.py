@@ -32,6 +32,7 @@ from .model_storage import (
 )
 from .model_defaults import all_defaults, effective_defaults, save_defaults
 from .memory import process_cuda_memory
+from .runtime import runtime_options
 from .comfy_queue import QueueUnavailable, queued_tts
 from .operations import REQUEST_ID, configure as configure_operations, emit
 from .models import (
@@ -235,6 +236,8 @@ def _render(request: SpeechRequest) -> bytes:
          characters=len(request.input), steps=request.steps if not is_qwen(model_id) else 0)
 
     # All backend switching occurs inside this serialized section.
+    # Runtime controls are server-side model defaults, not OpenAI speech fields.
+    runtime = runtime_options(effective_defaults(ROOT, model_id))
     with INFERENCE_LOCK:
         if is_index(model_id):
             if not ref:
@@ -243,6 +246,7 @@ def _render(request: SpeechRequest) -> bytes:
                 ENGINE.unload()
             if QWEN_ENGINE.loaded:
                 QWEN_ENGINE.unload()
+            INDEX_ENGINE.configure_runtime(runtime)
             emo_ref = None
             if request.emotion_mode == "reference":
                 ref_voice = _resolve_voice(request.emotion_reference_voice or "default", backend=model_id)
@@ -277,6 +281,7 @@ def _render(request: SpeechRequest) -> bytes:
                 if not ref:
                     raise ValueError("Saved voice has no reference audio to clone")
                 actual_model = qwen_base_for(model_id)
+            QWEN_ENGINE.configure_runtime(runtime)
             result = QWEN_ENGINE.generate(
                 actual_model, request.input, voice=request.voice,
                 reference_path=ref, reference_text=reference_text,
@@ -291,6 +296,7 @@ def _render(request: SpeechRequest) -> bytes:
             emit("model.switch", backend="voxcpm2",
                  model=VOX_ID, reason="switch")
             QWEN_ENGINE.unload()
+        ENGINE.configure_runtime(runtime)
         result = ENGINE.generate_with_delivery(
             request.input, instructions=request.instructions,
             reference_path=ref, reference_text=reference_text or None,
@@ -328,6 +334,20 @@ async def health():
             os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "backend:native"),
         ),
         "loaded": ENGINE.loaded or qwen_running or index_running,
+        "runtime": (
+            {"device": INDEX_ENGINE._resolved_device,
+             "precision": INDEX_ENGINE._runtime["precision"],
+             "int8_layers": INDEX_ENGINE.quantized_layers}
+            if index_running else
+            {"device": QWEN_ENGINE._resolved_device,
+             "precision": QWEN_ENGINE._runtime["precision"],
+             "int8_layers": QWEN_ENGINE.quantized_layers}
+            if qwen_running else
+            {"device": ENGINE._resolved_device,
+             "precision": ENGINE._runtime["precision"],
+             "int8_layers": ENGINE.quantized_layers}
+            if ENGINE.loaded else None
+        ),
         "paused": ENGINE.paused or QWEN_ENGINE.paused or INDEX_ENGINE.paused,
         "compile_enabled": ENGINE.optimize,
         "compile_fallback_used": ENGINE.compile_fallback_used,
@@ -555,7 +575,7 @@ def apply_speech_defaults(request: SpeechRequest) -> SpeechRequest:
     profile = effective_defaults(ROOT, model_id)
     omitted = {
         key: value for key, value in profile.items()
-        if key not in request.model_fields_set
+        if key in SpeechRequest.model_fields and key not in request.model_fields_set
     }
     # Preserve legacy clients sending IndexTTS delivery instructions without
     # a separate emotion mode. A previously saved, hidden description must
@@ -700,6 +720,7 @@ def _design_voice(request: DesignRequest):
             "IndexTTS 2.5 clones a saved recording; it does not design a new voice "
             "from a text description. Use Voices → Clone."
         )
+    runtime = runtime_options(effective_defaults(ROOT, selected))
     with INFERENCE_LOCK:
         if INDEX_ENGINE.loaded:
             INDEX_ENGINE.unload()
@@ -708,12 +729,14 @@ def _design_voice(request: DesignRequest):
             # is stored as an ordinary persistent voice and cloned by Base.
             if ENGINE.loaded:
                 ENGINE.unload()
+            QWEN_ENGINE.configure_runtime(runtime)
             return QWEN_ENGINE.generate(
                 QWEN_DESIGN, request.sample_text, instructions=request.description,
                 language=request.language, seed=request.seed,
             )
         if QWEN_ENGINE.loaded:
             QWEN_ENGINE.unload()
+        ENGINE.configure_runtime(runtime)
         return ENGINE.design_voice(
             request.sample_text, request.description, request.seed
         )
