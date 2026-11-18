@@ -70,13 +70,15 @@ def main() -> int:
         _send(connection, {"event": "hello", "token": token})
         try:
             import torch
-            from .runtime import apply_cpu_threads, quantize_int8, resolve_device
+            from .runtime import apply_cpu_threads, quantize_int8, require_int8_backend, resolve_device
             from indextts.infer_v2_5 import IndexTTS2
             device = resolve_device(os.environ.get("TTS_INDEX_DEVICE", "auto"), torch)
             precision = os.environ.get("TTS_INDEX_PRECISION", "native")
             if precision not in ("native", "int8"):
                 raise ValueError("Unsupported IndexTTS precision")
             apply_cpu_threads(torch, int(os.environ.get("TTS_INDEX_CPU_THREADS", "0")), device)
+            if precision == "int8":
+                require_int8_backend()
             model = IndexTTS2(
                 cfg_path=str(checkpoints / "config.yaml"),
                 model_dir=str(checkpoints),
