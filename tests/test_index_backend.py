@@ -25,6 +25,9 @@ class FakeIndexEngine:
         self.last_stats = {"seconds": 0.03, "audio_seconds": 0.2}
         self.calls = []
 
+    def configure_runtime(self, settings):
+        self.runtime = settings
+
     def generate(self, text, **kwargs):
         self.calls.append((text, kwargs))
         return silent_wav()
