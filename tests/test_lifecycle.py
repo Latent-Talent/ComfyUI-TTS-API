@@ -68,19 +68,25 @@ def test_reclaim_eventually_recovers_without_restart(tmp_path):
     assert calls == []
 
 
-def test_unhealthy_worker_only_terminated_after_three_failed_reclaims(tmp_path):
+def test_live_worker_not_terminated_by_health_probe_timeouts_during_cold_load(tmp_path):
     manager = ManagedTTS(root=tmp_path)
     calls = []
     manager._running = lambda: True
     manager._request_reclaim = lambda timeout=2.0: "unreachable"
+    # Health checks are unreliable during CPU-bound startup or INT8 conversion.
     manager._healthy = lambda: False
     manager._terminate = lambda: calls.append("terminated")
-    manager._yield_gpu()
+    for _ in range(12):
+        manager._yield_gpu()
+    assert calls == []
+    assert manager._reclaim_pending
+    assert manager._reclaim_failures == 12
+    # Only a successful reclaim ends the retry state; the process stays alive.
+    manager._request_reclaim = lambda timeout=2.0: "reclaimed"
     manager._yield_gpu()
     assert calls == []
-    manager._yield_gpu()
-    assert calls == ["terminated"]
     assert not manager._reclaim_pending
+    assert manager._reclaim_failures == 0
 
 
 def test_local_url_detection(tmp_path):
