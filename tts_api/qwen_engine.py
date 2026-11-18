@@ -21,6 +21,7 @@ import soundfile as sf
 from .operations import emit
 from .comfy_queue import active_request_kind, require_queue_reservation
 from .memory import is_memory_exhaustion, release_unused_cuda
+from .runtime import apply_cpu_threads, quantize_int8, resolve_device, runtime_options
 
 from .models import QWEN_MODELS, QWEN_SPEAKERS_LOOKUP
 
@@ -38,6 +39,9 @@ class QwenEngine:
         self.last_stats: dict = {}
         self.last_error: dict | None = None
         self._prompt_cache: OrderedDict[tuple, object] = OrderedDict()
+        self._runtime = runtime_options({})
+        self._resolved_device = None
+        self.quantized_layers = 0
 
     @property
     def loaded(self) -> bool:
@@ -51,12 +55,21 @@ class QwenEngine:
     def paused(self) -> bool:
         return self._paused
 
+    def configure_runtime(self, settings: dict) -> None:
+        config = runtime_options(settings)
+        with self._lock:
+            if config != self._runtime:
+                self._unload_locked()
+                self._runtime = config
+
     def _unload_locked(self) -> None:
         previous = self._model_id if self._model is not None else None
         self._prompt_cache.clear()
         model = self._model
         self._model = None
         self._model_id = None
+        self._resolved_device = None
+        self.quantized_layers = 0
         del model
         release_unused_cuda()
         self._last_activity = time.monotonic()
@@ -109,9 +122,11 @@ class QwenEngine:
                 "'bash install-qwen.sh' in ComfyUI-TTS-API, then restart "
                 "the managed TTS API from its sidebar."
             ) from exc
-        is_cuda = torch.cuda.is_available()
+        device = resolve_device(self._runtime["device"], torch)
+        apply_cpu_threads(torch, self._runtime["cpu_threads"], device)
+        is_cuda = device.startswith("cuda")
         kwargs = {
-            "device_map": "cuda:0" if is_cuda else "cpu",
+            "device_map": device,
             "dtype": torch.bfloat16 if is_cuda else torch.float32,
             "attn_implementation": "sdpa" if is_cuda else "eager",
         }
@@ -121,11 +136,19 @@ class QwenEngine:
         started = time.perf_counter()
         try:
             self._model = Qwen3TTSModel.from_pretrained(repo, **kwargs)
+            if self._runtime["precision"] == "int8":
+                target = getattr(self._model, "model", None)
+                if target is None or not hasattr(target, "named_modules"):
+                    raise RuntimeError("This Qwen-TTS package does not expose its Torch model for INT8")
+                self.quantized_layers = quantize_int8(target, scope="qwen", torch=torch)
+            self._resolved_device = device
         except Exception as exc:
             # Failed HF loads may have created temporary CUDA allocations
             # without ever assigning a fully constructed model to self.
             self._model = None
             self._model_id = None
+            self._resolved_device = None
+            self.quantized_layers = 0
             self._prompt_cache.clear()
             release_unused_cuda()
             emit("model.load.failed", backend="qwen3-tts", model=model_id,
@@ -134,6 +157,8 @@ class QwenEngine:
             raise
         self._model_id = model_id
         emit("model.load.completed", backend="qwen3-tts", model=model_id,
+             device=device, precision=self._runtime["precision"],
+             quantized_layers=self.quantized_layers,
              elapsed_ms=(time.perf_counter() - started) * 1000)
 
     @staticmethod
@@ -175,7 +200,8 @@ class QwenEngine:
                 torch = sys.modules.get("torch")
                 context = (
                     torch.random.fork_rng(
-                        devices=[torch.cuda.current_device()] if torch.cuda.is_available() else []
+                        devices=[torch.cuda.current_device()] if self._resolved_device and
+                        self._resolved_device.startswith("cuda") else []
                     ) if seed is not None and torch is not None else nullcontext()
                 )
                 with context:
