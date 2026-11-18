@@ -320,6 +320,7 @@ function mount(container) {
     let timer = null;
     let audioURL = null;
     let lastAudioBlob = null;
+    let testRequestInFlight = false;
     let destroyed = false;
     let initializing = true;
     let sessionVerified = false;
@@ -1084,6 +1085,7 @@ function mount(container) {
             ? "TTS backend not installed. Run bash install.sh once."
             : !ok ? "API is offline. Check the ComfyUI console or managed-server.log."
             : h.paused ? "Paused — ComfyUI is using the GPU."
+            : h.loading ? h.loading.stage
             : h.loaded ? "Online · Speech model loaded" : "Online · Model loads on demand";
         $("[data-service]").textContent = ok ? (result.running ? "Managed · online" : "External · online") : "Offline";
         $("[data-model]").textContent = h?.loaded_model || h?.active_model || h?.model || "VoxCPM2";
@@ -1098,13 +1100,35 @@ function mount(container) {
         const runtime = h?.runtime;
         const device = runtime?.device || "unknown";
         $("[data-memory]").textContent = !ok ? "Unavailable" : h.paused
-            ? "Released / paused" : !h.loaded ? "Unloaded"
+            ? "Released / paused" : h.loading ? "Loading / converting"
+            : !h.loaded ? "Unloaded"
             : device === "cpu" ? "Loaded in RAM" : device === "auto" ? "Loaded" : "Loaded in VRAM";
-        $("[data-runtime]").textContent = !ok ? "Unavailable" : !runtime
-            ? "Not loaded"
+        $("[data-runtime]").textContent = !ok ? "Unavailable"
+            : h.loading ? h.loading.stage + " (" +
+                (h.loading.device === "cpu" ? "CPU" : h.loading.device.toUpperCase()) +
+                " · " + (h.loading.precision === "int8" ? "INT8 W8A8" : "Native") + ")"
+            : !runtime ? "Not loaded"
             : (device === "cuda:0" ? "CUDA" : device.toUpperCase()) +
               " · " + (runtime.precision === "int8" ? "INT8 W8A8" : "Native") +
               (runtime.precision === "int8" ? " · " + runtime.int8_layers + " layers" : "");
+        const testStatus = $("[data-test-runtime-status]");
+        if (!ok) {
+            testStatus.textContent = "TTS API unavailable.";
+        } else if (h.loading) {
+            testStatus.textContent = h.loading.stage + " · " +
+                (h.loading.device === "cpu" ? "CPU" : h.loading.device.toUpperCase()) +
+                " · " + (h.loading.precision === "int8" ? "INT8 W8A8" : "Native");
+        } else if (testRequestInFlight) {
+            testStatus.textContent = "Waiting for generation or queue reservation…";
+        } else if (h.loaded && runtime) {
+            testStatus.textContent = "Loaded model: " + h.loaded_model + " · " +
+                (device === "cpu" ? "CPU" : device === "cuda:0" ? "CUDA GPU" : device.toUpperCase()) +
+                " · " + (runtime.precision === "int8" ? "INT8 W8A8" : "Native") +
+                (runtime.precision === "int8" ? " · " + runtime.int8_layers +
+                " layers converted" : "");
+        } else {
+            testStatus.textContent = "No model loaded. Quantization runs on the next INT8 model load.";
+        }
         $("[data-allocator]").textContent = h?.cuda_allocator || "Unknown";
         $("[data-idle]").textContent = result.config.idle_unload_seconds === 0
             ? "Disabled" : result.config.idle_unload_seconds + "s";
@@ -1709,20 +1733,26 @@ function mount(container) {
                 $("[data-index-emo-reference]").value = voice.id;
                 updateEmotionControls();
             }
-            const response = await request("/speech", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-            });
-            const blob = await response.blob();
-            lastAudioBlob = blob;
-            if (audioURL) URL.revokeObjectURL(audioURL);
-            cleanupVoicePreviews();
-            audioURL = URL.createObjectURL(blob);
-            const player = $("[data-audio]");
-            player.src = audioURL;
-            player.hidden = false;
-            player.play().catch(() => {});
-            captureSidebarSession();
+            testRequestInFlight = true;
+            try {
+                const response = await request("/speech", {
+                    method: "POST", headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify(body),
+                });
+                const blob = await response.blob();
+                lastAudioBlob = blob;
+                if (audioURL) URL.revokeObjectURL(audioURL);
+                cleanupVoicePreviews();
+                audioURL = URL.createObjectURL(blob);
+                const player = $("[data-audio]");
+                player.src = audioURL;
+                player.hidden = false;
+                player.play().catch(() => {});
+                captureSidebarSession();
+            } finally {
+                testRequestInFlight = false;
+                refreshStatus().catch(() => {});
+            }
         }, "Generation complete."));
 
     async function initializeSidebar() {
