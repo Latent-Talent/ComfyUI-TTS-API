@@ -24,10 +24,11 @@ class QueueUnavailable(RuntimeError):
     pass
 
 
-# Set only after the broker confirms our reservation is RUNNING. ContextVars
+# A GPU/Auto request gets a real ticket only once the ComfyUI broker starts
+# its reservation. Explicit CPU requests use a distinct (None, kind) scope
+# which permits CPU-only loads but cannot authorize GPU operations. ContextVars
 # propagate to anyio worker threads, including model load inside _render.
-# The opaque ticket is never logged, returned in HTTP errors, or persisted
-# into the model state.
+# Opaque tickets are never logged, returned in errors, or stored in models.
 _ACTIVE_RESERVATION: ContextVar[tuple[str | None, str] | None] = ContextVar(
     "tts_comfy_active_reservation", default=None
 )
@@ -38,16 +39,24 @@ def active_request_kind() -> str | None:
     return reservation[1] if reservation else None
 
 
-def require_queue_reservation() -> None:
-    """Fail closed before any model weights load in managed ComfyUI mode."""
+def require_queue_reservation(device: str = "auto") -> None:
+    """Authorize GPU via queue ticket or explicitly CPU via CPU request scope.
+
+    A CPU bypass marker is not a general-purpose queue ticket: even a cached
+    GPU model or an Auto device request must still hold a genuine reservation.
+    """
     managed = bool(
         os.getenv("TTS_COMFY_QUEUE_URL") or os.getenv("TTS_CONTROL_TOKEN")
     )
     if managed:
         reservation = _ACTIVE_RESERVATION.get()
-        if reservation is None or not reservation[0]:
+        if reservation is None or (
+            not reservation[0] and not (reservation[1] in ("speech", "voice_design")
+                                        and device == "cpu")
+        ):
             raise QueueUnavailable(
-                "TTS model loading requires an active ComfyUI queue reservation"
+                "TTS model loading requires an active ComfyUI queue reservation "
+                "unless the request explicitly uses CPU"
             )
 
 
@@ -143,3 +152,20 @@ async def queued_tts(kind: str):
                     pass
         finally:
             _ACTIVE_RESERVATION.reset(reservation_token)
+
+
+
+@asynccontextmanager
+async def cpu_tts(kind: str):
+    """Request-scoped CPU-only authorization; never contacts ComfyUI's queue.
+
+    Used only for the explicit CPU runtime choice. A backend attempting to
+    load or generate with Auto/CUDA inside this scope fails closed.
+    """
+    if kind not in ("speech", "voice_design"):
+        raise ValueError("Unsupported CPU TTS operation")
+    token = _ACTIVE_RESERVATION.set((None, kind))
+    try:
+        yield
+    finally:
+        _ACTIVE_RESERVATION.reset(token)
