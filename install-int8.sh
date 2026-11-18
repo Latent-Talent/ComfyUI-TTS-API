@@ -23,22 +23,51 @@ install_one() {
     echo "Missing Python environment: $python" >&2
     return 1
   fi
-  # Intentionally do not install dependencies; doing so can overwrite the
-  # worker's known-good torch/torchaudio/CUDA wheels.
+  # Resolve the release from the worker's installed torch *before* importing
+  # torchao. Importing a too-new torchao can break other package imports.
+  local spec
+  spec="$("$python" - <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+from tts_api.torchao_compat import torchao_for_torch
+import sys
+
+try:
+    torch_version = version("torch")
+except PackageNotFoundError:
+    print("PyTorch is not installed in this TTS environment.", file=sys.stderr)
+    raise SystemExit(1)
+try:
+    spec = torchao_for_torch(torch_version)
+except ValueError as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(1)
+print(spec)
+PY
+  )"
+  echo "Using $spec for $python"
+  # Do not replace Torch/CUDA/torchaudio, especially in the locked IndexTTS env.
+  # The exact version also replaces an incompatible torchao already installed.
   if "$python" -m pip --version >/dev/null 2>&1; then
-    "$python" -m pip install --no-deps torchao
+    "$python" -m pip install --no-deps "$spec"
   else
     local uv
     if ! uv="$(choose_uv)"; then
       echo "uv or pip is required to install torchao in $python" >&2
       return 1
     fi
-    "$uv" pip install --python "$python" --no-deps torchao
+    UV_LINK_MODE=copy "$uv" pip install --python "$python" --no-deps "$spec"
   fi
   "$python" - <<'PY'
-import torch, torchao
+from importlib.metadata import version
+from tts_api.torchao_compat import torchao_for_torch
 from torchao.quantization import Int8DynamicActivationInt8WeightConfig, quantize_
-print("Torch:", torch.__version__, "TorchAO:", getattr(torchao, "__version__", "installed"))
+import torch
+
+expected = torchao_for_torch(torch.__version__).partition("==")[2]
+installed = version("torchao")
+if installed != expected:
+    raise RuntimeError(f"Expected TorchAO {expected}, got {installed}")
+print("Torch:", torch.__version__, "TorchAO:", installed)
 print("CUDA available:", torch.cuda.is_available())
 print("INT8 W8A8 operators imported successfully")
 PY
