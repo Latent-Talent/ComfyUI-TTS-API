@@ -68,7 +68,7 @@ cd ~/ComfyUI/custom_nodes/ComfyUI-TTS-API
 bash install-int8.sh core
 ~~~
 
-For IndexTTS, which runs in a separate Python 3.11 environment, use `bash install-int8.sh index`. The installer uses `--no-deps` so it does **not** replace Torch, CUDA libraries, Python, or your existing ComfyUI installation. A compatible TorchAO build is still required. To avoid changing PyTorch behavior, the default remains `Native`. `CPU threads = 0` uses PyTorch's chosen thread count; explicitly requested counts must fit the worker's available CPU affinity (including WSL limits).
+For IndexTTS, which runs in a separate Python 3.11 environment, use `bash install-int8.sh index`. The installer detects the worker's existing PyTorch version and pins a compatible TorchAO release (for example **Torch 2.8.0 → TorchAO 0.13.0**). Rerunning it replaces an incompatible TorchAO version, such as 0.18.0 on Torch 2.8. It uses `--no-deps` so it does **not** replace Torch, CUDA libraries, Python, or your existing ComfyUI installation. A compatible TorchAO build and actual model-level inference validation are still required. To avoid changing PyTorch behavior, the default remains `Native`. `CPU threads = 0` uses PyTorch's chosen thread count; explicitly requested counts must fit the worker's available CPU affinity (including WSL limits).
 
 ### Qwen3-TTS
 
