@@ -147,7 +147,7 @@ class IndexEngine:
             self._lock.release()
 
     def _load(self) -> None:
-        require_queue_reservation()
+        require_queue_reservation(self._runtime["device"])
         if self.loaded:
             return
         python = index_python()
@@ -271,7 +271,7 @@ class IndexEngine:
         emotion_strength: float = 0.65, emotion_reference: str | None = None,
         duration_factor: float = 1.0, seed: int | None = None,
     ) -> bytes:
-        require_queue_reservation()
+        require_queue_reservation(self._runtime["device"])
         if not reference_path or not Path(reference_path).is_file():
             raise ValueError(
                 "IndexTTS requires a saved voice recording. "
@@ -296,7 +296,7 @@ class IndexEngine:
         if not 0 <= emotion_strength <= 1 or not 0.5 <= duration_factor <= 2.0:
             raise ValueError("IndexTTS emotion strength or speaking duration out of range")
         with self._lock:
-            if self._paused:
+            if self._paused and self._runtime["device"] != "cpu":
                 raise RuntimeError("IndexTTS paused while ComfyUI needs GPU memory")
             started = time.perf_counter()
             self.last_error = None
