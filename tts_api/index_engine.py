@@ -229,6 +229,9 @@ class IndexEngine:
                 if stage in ("Loading IndexTTS model weights",
                              "Converting IndexTTS GPT to INT8 W8A8"):
                     self._loading_stage = stage
+                    if stage == "Converting IndexTTS GPT to INT8 W8A8":
+                        emit("model.quantization.started", backend="indextts",
+                             device=self._runtime["device"], precision="int8")
                 ready = self._read()
             if ready.get("event") != "ready":
                 raise RuntimeError(
@@ -238,12 +241,19 @@ class IndexEngine:
                 )
             self._resolved_device = ready.get("device")
             self.quantized_layers = int(ready.get("quantized_layers", 0))
+            if self._runtime["precision"] == "int8":
+                emit("model.quantization.completed", backend="indextts",
+                     device=self._resolved_device, precision="int8",
+                     quantized_layers=self.quantized_layers)
             self._loading_stage = None
             emit("model.load.completed", model=INDEX_ID, backend="indextts",
                  device=self._resolved_device, precision=self._runtime["precision"],
                  quantized_layers=self.quantized_layers,
                  elapsed_ms=(time.perf_counter() - started) * 1000)
         except BaseException as exc:
+            if self._loading_stage == "Converting IndexTTS GPT to INT8 W8A8":
+                emit("model.quantization.failed", backend="indextts",
+                     precision="int8", error_type=type(exc).__name__)
             emit("model.load.failed", model=INDEX_ID, backend="indextts",
                  error_type=type(exc).__name__, elapsed_ms=(time.perf_counter() - started) * 1000)
             self._unload_locked()
