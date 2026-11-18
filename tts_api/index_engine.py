@@ -56,6 +56,7 @@ class IndexEngine:
         self._runtime = {"device": "auto", "precision": "native", "cpu_threads": 0}
         self._resolved_device = None
         self.quantized_layers = 0
+        self._loading_stage = None
 
     def configure_runtime(self, settings: dict) -> None:
         from .runtime import runtime_options
@@ -91,6 +92,7 @@ class IndexEngine:
         self._connection = self._reader = self._process = self._tmp = None
         self._resolved_device = None
         self.quantized_layers = 0
+        self._loading_stage = None
         if conn is not None:
             try:
                 conn.shutdown(socket.SHUT_RDWR)
@@ -161,8 +163,10 @@ class IndexEngine:
                 "IndexTTS 2.5 weights not downloaded. Select IndexTTS and use "
                 "Download weights in the TTS sidebar."
             )
+        self._loading_stage = "Starting IndexTTS worker"
         emit("model.load.started", model=INDEX_ID, backend="indextts",
-             kind=active_request_kind())
+             kind=active_request_kind(), device=self._runtime["device"],
+             precision=self._runtime["precision"])
         started = time.perf_counter()
         root = Path(tempfile.mkdtemp(prefix="comfy-tts-index-"))
         os.chmod(root, 0o700)
@@ -218,7 +222,14 @@ class IndexEngine:
             if hello.get("event") != "hello" or not secrets.compare_digest(
                     str(hello.get("token", "")), secret):
                 raise RuntimeError("IndexTTS worker authentication failed")
+            self._loading_stage = "Loading IndexTTS model weights"
             ready = self._read()
+            while ready.get("event") == "progress":
+                stage = ready.get("stage")
+                if stage in ("Loading IndexTTS model weights",
+                             "Converting IndexTTS GPT to INT8 W8A8"):
+                    self._loading_stage = stage
+                ready = self._read()
             if ready.get("event") != "ready":
                 raise RuntimeError(
                     "IndexTTS initialization failed (" +
@@ -227,6 +238,7 @@ class IndexEngine:
                 )
             self._resolved_device = ready.get("device")
             self.quantized_layers = int(ready.get("quantized_layers", 0))
+            self._loading_stage = None
             emit("model.load.completed", model=INDEX_ID, backend="indextts",
                  device=self._resolved_device, precision=self._runtime["precision"],
                  quantized_layers=self.quantized_layers,
