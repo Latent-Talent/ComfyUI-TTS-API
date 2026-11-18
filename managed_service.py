@@ -627,17 +627,16 @@ class ManagedTTS:
             LOG.debug("[TTS API] GPU reclaim deferred; TTS inference still active")
             return
         self._reclaim_failures += 1
-        if self._reclaim_failures >= 3 and not self._healthy():
-            # Escalate only after repeated errors *and* a failed health check.
-            # A healthy or busy service must not be stopped for slow cleanup.
-            LOG.warning("[TTS API] Managed worker unresponsive after repeated "
-                        "GPU reclaim failures; restarting worker to free VRAM")
-            self._terminate()
-            self._reclaim_pending = False
-            self._reclaim_failures = 0
-        else:
-            LOG.warning("[TTS API] GPU reclaim %s; keeping worker alive and "
-                        "retrying without interrupting speech", result)
+        # A cold model load or INT8 conversion may hold the GIL / saturate
+        # CPU resources long enough for both the reclaim and health HTTP
+        # probes to time out. Those timeouts are NOT evidence that a live
+        # worker is safe to kill: it can still own an active HTTP request.
+        # Restart genuinely exited processes in _watch_queue, never from
+        # failed HTTP probes. Keep retrying without aborting user synthesis.
+        if self._reclaim_failures in (1, 3, 10, 30):
+            LOG.warning("[TTS API] GPU reclaim %s (%d consecutive failures); "
+                        "worker process still running, deferring reclaim "
+                        "without cancelling speech", result, self._reclaim_failures)
 
     def reserve_for_comfy(self):
         try:
