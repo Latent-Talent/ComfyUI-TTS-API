@@ -53,6 +53,17 @@ class IndexEngine:
         self.unload_after_request = unload_after_request
         self.last_stats: dict = {}
         self.last_error: dict | None = None
+        self._runtime = {"device": "auto", "precision": "native", "cpu_threads": 0}
+        self._resolved_device = None
+        self.quantized_layers = 0
+
+    def configure_runtime(self, settings: dict) -> None:
+        from .runtime import runtime_options
+        config = runtime_options(settings)
+        with self._lock:
+            if config != self._runtime:
+                self._unload_locked()
+                self._runtime = config
 
     @property
     def loaded(self) -> bool:
@@ -78,6 +89,8 @@ class IndexEngine:
         loaded = self.loaded
         conn, reader, proc, temporary = self._connection, self._reader, self._process, self._tmp
         self._connection = self._reader = self._process = self._tmp = None
+        self._resolved_device = None
+        self.quantized_layers = 0
         if conn is not None:
             try:
                 conn.shutdown(socket.SHUT_RDWR)
@@ -174,6 +187,9 @@ class IndexEngine:
                 "TTS_INDEX_TOKEN": secret,
                 "TTS_INDEX_OUTPUTS": str(root),
                 "TTS_INDEX_PARENT_PID": str(os.getpid()),
+                "TTS_INDEX_DEVICE": self._runtime["device"],
+                "TTS_INDEX_PRECISION": self._runtime["precision"],
+                "TTS_INDEX_CPU_THREADS": str(self._runtime["cpu_threads"]),
                 "PYTHONPATH": os.pathsep.join([str(source), str(Path(__file__).resolve().parents[1]), os.environ.get("PYTHONPATH", "")]),
             })
             self._process = subprocess.Popen(
@@ -209,7 +225,11 @@ class IndexEngine:
                     str(ready.get("error_type", "RuntimeError"))[:60] +
                     "); see data/index-worker.log"
                 )
+            self._resolved_device = ready.get("device")
+            self.quantized_layers = int(ready.get("quantized_layers", 0))
             emit("model.load.completed", model=INDEX_ID, backend="indextts",
+                 device=self._resolved_device, precision=self._runtime["precision"],
+                 quantized_layers=self.quantized_layers,
                  elapsed_ms=(time.perf_counter() - started) * 1000)
         except BaseException as exc:
             emit("model.load.failed", model=INDEX_ID, backend="indextts",
