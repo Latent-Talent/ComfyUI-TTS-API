@@ -53,7 +53,22 @@ In **Server → Model-specific defaults**, selecting any model shows only settin
 
 The Server tab shows **context-sensitive inputs**: selecting IndexTTS emotion mode `text` reveals an emotion description, `vector` reveals eight sliders/values, `reference` reveals a saved emotion voice selector, while `neutral` hides emotion-specific inputs. Default-voice selectors use existing voices; to add one, open **Voices → Clone voice from recording**. The Test tab uses saved character voices and supports a separate optional IndexTTS emotion-reference upload.
 
-Click **Save defaults** to persist that model's settings, or **Restore model defaults** to reset just that model to its original values. Defaults take effect on new API requests immediately, without restarting ComfyUI or the TTS worker. **Explicit request fields override saved defaults**, including values like `seed: null` or an empty `instructions` string. The Test tab loads saved defaults when its selected model changes; it always requests WAV audio for local playback.
+Click **Save defaults** to persist that model's settings, or **Restore model defaults** to reset just that model to its original values. Defaults take effect on new API requests immediately, without restarting ComfyUI or the TTS worker. **Explicit speech-request fields override saved speech defaults**, including values like `seed: null` or an empty `instructions` string. Device, precision and thread settings are worker-side choices and are not speech-request fields. The Test tab loads saved defaults when its selected model changes; it always requests WAV audio for local playback.
+
+### CPU/GPU inference and optional INT8 (experimental)
+
+Each model's **Server → Model-specific defaults** now includes **Execution device** (`Auto`, `CPU`, or `CUDA`), **Model precision** (`Native` or `INT8`), and **CPU inference threads** (0 = PyTorch default). Save the changes before generating. They apply to the model's *next* speech/voice-design request and force a reload if the selected configuration differs from the resident model. CPU runs independently of GPU inference memory, but still participates in the normal ComfyUI request queue. The `Auto` device preserves the original CUDA-preferred behavior.
+
+INT8 uses **TorchAO W8A8**: 8-bit weights with dynamically quantized 8-bit activations for eligible large linear layers. The Talker/Code Predictor is targeted in Qwen; VoxCPM2 and the IndexTTS GPT are selectively converted. Audio decoders, codecs, embeddings, normalization and unsuitable layers retain native precision. No permanent quantized checkpoint is produced: the original weights stay untouched, and INT8 conversion runs again after a cold load. Initial conversion can temporarily need full-precision model memory. Quality, CPU speed and CUDA kernel compatibility are **not guaranteed**, particularly for IndexTTS; measure real-time factor and listen for speech artifacts. If no supported layers exist, TorchAO is unavailable, or conversion fails, loading reports an error instead of silently using the native model.
+
+Install TorchAO **only in the separate TTS worker environment**, never ComfyUI's Python environment:
+
+~~~bash
+cd ~/ComfyUI/custom_nodes/ComfyUI-TTS-API
+bash install-int8.sh core
+~~~
+
+For IndexTTS, which runs in a separate Python 3.11 environment, use `bash install-int8.sh index`. The installer uses `--no-deps` so it does **not** replace Torch, CUDA libraries, Python, or your existing ComfyUI installation. A compatible TorchAO build is still required. To avoid changing PyTorch behavior, the default remains `Native`. `CPU threads = 0` uses PyTorch's chosen thread count; explicitly requested counts must fit the worker's available CPU affinity (including WSL limits).
 
 ### Qwen3-TTS
 
