@@ -109,3 +109,43 @@ def test_quantizer_fails_if_nothing_is_eligible(monkeypatch):
     ]))
     with pytest.raises(RuntimeError, match="No compatible linear layers"):
         quantize_int8(root, scope="qwen", torch=torch)
+
+
+
+@pytest.mark.parametrize("factory", [
+    lambda: __import__("tts_api.engine", fromlist=["VoxEngine"]).VoxEngine("mock"),
+    lambda: __import__("tts_api.qwen_engine", fromlist=["QwenEngine"]).QwenEngine(),
+    lambda: __import__("tts_api.index_engine", fromlist=["IndexEngine"]).IndexEngine(),
+])
+def test_normalized_api_runtime_is_not_reset_by_engine(factory):
+    """Catch the previous bug: API selects CPU/INT8, engine silently loads auto/native."""
+    engine = factory()
+    from_saved = runtime_options({
+        "runtime_device": "cpu", "runtime_precision": "int8",
+        "runtime_cpu_threads": 8,
+    })
+    assert from_saved == {"device": "cpu", "precision": "int8", "cpu_threads": 8}
+    engine.configure_runtime(from_saved)
+    assert engine._runtime == from_saved
+    # Reapplying the normalized configuration must not change it.
+    engine.configure_runtime(from_saved)
+    assert engine._runtime == from_saved
+    # Model API can also supply the saved-format configuration directly.
+    engine.configure_runtime({
+        "runtime_device": "cuda", "runtime_precision": "native",
+        "runtime_cpu_threads": 12,
+    })
+    assert engine._runtime == {"device": "cuda", "precision": "native",
+                               "cpu_threads": 12}
+
+
+def test_runtime_options_reject_incomplete_or_conflicting_normalized_configuration():
+    with pytest.raises(ValueError, match="Incomplete canonical"):
+        runtime_options({"device": "cpu"})
+    with pytest.raises(ValueError, match="Mixed canonical"):
+        runtime_options({"device": "cpu", "precision": "int8", "cpu_threads": 8,
+                         "runtime_device": "cuda"})
+    with pytest.raises(ValueError, match="Unsupported TTS"):
+        runtime_options({"device": "xpu", "precision": "int8", "cpu_threads": 8})
+    with pytest.raises(ValueError, match="Unsupported TTS"):
+        runtime_options({"device": "cpu", "precision": "int4", "cpu_threads": 8})
